@@ -1,5 +1,8 @@
 let state = null;
 let authMode = "login";
+const COOKIE_CONSENT_KEY = "tippliga-cookie-consent";
+let cookieConsent = "unknown";
+let authAfterCookieConsent = false;
 
 const leaderboardBody = document.querySelector("#leaderboard-body");
 const playerCount = document.querySelector("#player-count");
@@ -8,8 +11,35 @@ const authDialog = document.querySelector("#auth-dialog");
 const authForm = document.querySelector("#auth-form");
 const authError = document.querySelector("#auth-error");
 const submitStatus = document.querySelector("#submit-status");
+const cookieDialog = document.querySelector("#cookie-dialog");
 let draftSaveTimeout = null;
 let draftSyncPromise = Promise.resolve();
+
+try {
+  const savedConsent = localStorage.getItem(COOKIE_CONSENT_KEY);
+  if (savedConsent === "accepted" || savedConsent === "declined") cookieConsent = savedConsent;
+} catch (error) {
+  console.error("Could not read the cookie consent preference:", error);
+}
+
+function hasCookieConsent() {
+  return cookieConsent === "accepted";
+}
+
+function saveCookieConsent(value) {
+  cookieConsent = value;
+  try {
+    localStorage.setItem(COOKIE_CONSENT_KEY, value);
+  } catch (error) {
+    console.error("Could not save the cookie consent preference:", error);
+    submitStatus.textContent = "Deine Cookie-Auswahl kann in diesem Browser nicht dauerhaft gespeichert werden.";
+  }
+}
+
+function openCookieSettings(forAuthentication = false) {
+  authAfterCookieConsent = forAuthentication;
+  if (!cookieDialog.open) cookieDialog.showModal();
+}
 
 function draftKey() {
   const username = state?.me?.username.toLowerCase() || "guest";
@@ -115,10 +145,14 @@ function removeSubmittedDraft(tips) {
 }
 
 async function api(path, body) {
+  const headers = body === undefined ? {} : { "Content-Type": "application/json" };
+  if ((path === "/api/login" || path === "/api/register") && hasCookieConsent()) {
+    headers["X-Tippliga-Cookie-Consent"] = "accepted";
+  }
   const response = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
     credentials: "same-origin",
-    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json();
@@ -482,6 +516,10 @@ document.querySelector("#blocked-username-form").addEventListener("submit", asyn
 });
 
 function openAuth(mode = "login") {
+  if (!hasCookieConsent()) {
+    openCookieSettings(true);
+    return;
+  }
   authMode = mode;
   authError.textContent = "";
   authForm.reset();
@@ -511,6 +549,34 @@ function openAuth(mode = "login") {
   document.querySelector("#username").focus();
 }
 
+document.querySelector("#accept-cookies").addEventListener("click", () => {
+  saveCookieConsent("accepted");
+  cookieDialog.close();
+  if (authAfterCookieConsent) openAuth();
+  authAfterCookieConsent = false;
+});
+
+document.querySelector("#decline-cookies").addEventListener("click", async () => {
+  saveCookieConsent("declined");
+  cookieDialog.close();
+  authAfterCookieConsent = false;
+  let status = "Ohne notwendige Cookies kannst du dich nicht anmelden oder registrieren.";
+  if (state?.me) {
+    try {
+      await api("/api/logout", {});
+      await refresh();
+    } catch (error) {
+      status = `Abmeldung nach der Ablehnung fehlgeschlagen: ${error.message}`;
+    }
+  }
+  submitStatus.textContent = status;
+});
+
+document.querySelector("#cookie-settings").addEventListener("click", () => {
+  openCookieSettings();
+});
+cookieDialog.addEventListener("cancel", (event) => event.preventDefault());
+
 document.querySelector("#account-button").addEventListener("click", async () => {
   if (!state?.me) {
     openAuth();
@@ -536,12 +602,18 @@ authDialog.addEventListener("click", (event) => {
 authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   authError.textContent = "";
+  if (!hasCookieConsent()) {
+    authDialog.close();
+    openCookieSettings(true);
+    return;
+  }
   const submit = document.querySelector("#auth-submit");
   submit.disabled = true;
   const form = new FormData(authForm);
   try {
+    let authenticatedUser;
     if (authMode === "register") {
-      await api("/api/register", {
+      authenticatedUser = await api("/api/register", {
         username: form.get("username"),
         firstName: form.get("firstName"),
         lastName: form.get("lastName"),
@@ -551,13 +623,19 @@ authForm.addEventListener("submit", async (event) => {
         password: form.get("password"),
       });
     } else {
-      await api("/api/login", {
+      authenticatedUser = await api("/api/login", {
         identity: form.get("username"),
         password: form.get("password"),
       });
     }
+    const authenticatedState = await api("/api/state");
+    if (authenticatedState.me?.username.toLowerCase() !== authenticatedUser.username.toLowerCase()) {
+      throw new Error("Die Anmeldung hat nicht geklappt. Bitte erlaube Cookies in deinen Browser-Einstellungen und versuche es erneut.");
+    }
     authDialog.close();
-    await refresh();
+    state = authenticatedState;
+    render();
+    await refreshAdminPanel();
   } catch (error) {
     authError.textContent = error.message;
   } finally {
@@ -614,5 +692,6 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
   }
 });
 
+if (cookieConsent === "unknown") openCookieSettings();
 refresh();
 window.setInterval(refresh, 5 * 60 * 1000);

@@ -822,6 +822,12 @@ async function handle(request) {
         return json({ error: "Ungültige Anfragequelle." }, 403);
       }
     }
+    if ((path === "/api/register" || path === "/api/login")
+        && request.headers.get("x-tippliga-cookie-consent") !== "accepted") {
+      return json({
+        error: "Bitte erlaube notwendige Cookies, um dich anzumelden oder zu registrieren.",
+      }, 403);
+    }
     if (path === "/api/register") {
       try {
         return await register(data, request);

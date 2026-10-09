@@ -131,8 +131,23 @@
     <footer class="footer">
       <a class="brand footer-brand" href="#"><span class="brand-mark" aria-hidden="true">T<span>.</span></span><span>tipp<span class="brand-light">liga</span></span></a>
       <span>GUTE TIPPS. GUTE ZEIT.</span>
-      <span>© 2026 TIPPLIGA</span>
+      <div class="footer-end">
+        <button id="cookie-settings" class="cookie-settings" type="button">Cookie-Einstellungen</button>
+        <span>© 2026 TIPPLIGA</span>
+      </div>
     </footer>
+
+    <dialog id="cookie-dialog" class="auth-dialog cookie-dialog">
+      <section class="auth-card">
+        <div class="eyebrow muted">ANMELDUNG & GERÄTESCHUTZ</div>
+        <h2>Cookies für dein Konto<span class="yellow-dot">.</span></h2>
+        <p class="auth-description">Für Anmeldung und den 30-Tage-Geräteschutz braucht Tippliga notwendige Cookies. Sie speichern deine Sitzung und erkennen den Browser wieder, falls ein Konto gesperrt wurde. Es gibt keine Werbe- oder Tracking-Cookies. Wenn du ablehnst, kannst du dich nicht anmelden oder registrieren. Im privaten/Inkognito-Modus können Cookies beim Schließen gelöscht werden; dieser Modus lässt sich nicht zuverlässig erkennen oder technisch sicher ausschließen.</p>
+        <div class="cookie-actions">
+          <button id="accept-cookies" class="button button-yellow" type="button">Notwendige Cookies erlauben</button>
+          <button id="decline-cookies" class="button button-outline" type="button">Ablehnen</button>
+        </div>
+      </section>
+    </dialog>
 
     <dialog id="auth-dialog" class="auth-dialog">
       <form id="auth-form" class="auth-card">

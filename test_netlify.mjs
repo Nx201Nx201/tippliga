@@ -100,9 +100,24 @@ test("moderation endpoints reject unauthenticated requests", async () => {
 test("function validates registration before requiring a database", async () => {
   const response = await handler(new Request("https://example.net/api/register", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Tippliga-Cookie-Consent": "accepted",
+    },
     body: JSON.stringify({ username: "x" }),
   }));
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /Benutzername/);
+});
+
+test("login and registration require explicit necessary-cookie consent", async () => {
+  for (const path of ["/api/login", "/api/register"]) {
+    const response = await handler(new Request(`https://example.net${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    }));
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).error, /notwendige Cookies/);
+  }
 });

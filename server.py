@@ -711,6 +711,15 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json(HTTPStatus.FORBIDDEN, {"error": "Ungültige Anfragequelle."})
                 return
 
+        if path in {"/api/register", "/api/login"} and self.headers.get(
+            "X-Tippliga-Cookie-Consent"
+        ) != "accepted":
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "Bitte erlaube notwendige Cookies, um dich anzumelden oder zu registrieren."},
+            )
+            return
+
         if path == "/api/register":
             self._register(data)
         elif path == "/api/login":

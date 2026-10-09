@@ -51,10 +51,12 @@ class TippligaServerTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.temp_dir.cleanup()
 
-    def request(self, method, path, body=None):
+    def request(self, method, path, body=None, consent=True):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
         payload = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if payload else {}
+        if path in {"/api/register", "/api/login"} and consent:
+            headers["X-Tippliga-Cookie-Consent"] = "accepted"
         if self.cookie:
             headers["Cookie"] = self.cookie
         connection.request(method, path, body=payload, headers=headers)
@@ -104,6 +106,20 @@ class TippligaServerTests(unittest.TestCase):
             "SELECT * FROM tips WHERE user_id = %s AND season = %s",
         )
         self.assertEqual(connection.parameters, (7, 2026))
+
+    def test_authentication_requires_cookie_consent(self):
+        status, error = self.request("POST", "/api/register", {
+            "username": "NoConsent",
+        }, consent=False)
+        self.assertEqual(status, 403)
+        self.assertIn("notwendige Cookies", error["error"])
+
+        status, error = self.request("POST", "/api/login", {
+            "identity": "TestTipp",
+            "password": "sicheres-test-passwort",
+        }, consent=False)
+        self.assertEqual(status, 403)
+        self.assertIn("notwendige Cookies", error["error"])
 
     def test_registration_requires_real_fields_and_persists_account(self):
         status, error = self.request("POST", "/api/register", {

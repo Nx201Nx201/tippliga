@@ -28,16 +28,6 @@ Die App ist jetzt für Render vorbereitet (`render.yaml`). Für die Veröffentli
 
 Die Spieltagskarten zeigen vollständige Vereinsnamen und Vereinswappen der Bundesliga-Datenquelle. Die Bilddateien werden von den in der Content-Security-Policy freigegebenen Wappen-Hosts geladen.
 
-## Familie und Freunde im selben Netzwerk
-
-Auf dem Rechner, der als Server dienen soll (nur privates, vertrauenswürdiges WLAN):
-
-```sh
-TIPPLIGA_HOST=0.0.0.0 python3 server.py
-```
-
-Andere Geräte öffnen `http://<LAN-IP-DES-SERVERS>:8000`. Für Internetzugriff Render gemäß Abschnitt oben verwenden; den einfachen Python-Server nicht ungeschützt direkt ins Internet stellen.
-
 ## Konten und Tipps
 
 - Registrierung benötigt Benutzername, Vorname, Nachname, E-Mail und ein Passwort mit mindestens 10 Zeichen. Adresse und Telefonnummer sind optional.

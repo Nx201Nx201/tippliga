@@ -106,6 +106,26 @@
         </div>
         <p id="submit-status" class="submit-status" role="status" aria-live="polite"></p>
       </section>
+
+      <section id="admin-panel" class="admin-section panel" hidden>
+        <div class="admin-heading">
+          <div>
+            <div class="eyebrow muted">ADMINISTRATION</div>
+            <h2>Spieler verwalten<span class="yellow-dot">.</span></h2>
+          </div>
+        </div>
+        <p class="admin-description">Gesperrte Spieler können sich nicht anmelden oder tippen. Gesperrte Namen werden bei neuen Registrierungen abgelehnt; bestehende Konten musst du separat sperren.</p>
+        <ul id="admin-users" class="admin-list"></ul>
+        <form id="blocked-username-form" class="blocked-username-form">
+          <label for="blocked-username">Benutzername für neue Registrierungen sperren</label>
+          <div class="admin-form-row">
+            <input id="blocked-username" name="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_.-]{3,24}" required>
+            <button class="button button-outline" type="submit">Namen sperren</button>
+          </div>
+        </form>
+        <ul id="blocked-username-list" class="admin-list"></ul>
+        <p id="admin-status" class="submit-status" role="status" aria-live="polite"></p>
+      </section>
     </main>
 
     <footer class="footer">

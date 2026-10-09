@@ -66,12 +66,12 @@ class TippligaServerTests(unittest.TestCase):
         connection.close()
         return response.status, data
 
-    def register(self):
+    def register(self, username="TestTipp", email="mara@example.de"):
         return self.request("POST", "/api/register", {
-            "username": "TestTipp",
+            "username": username,
             "firstName": "Mara",
             "lastName": "Muster",
-            "email": "mara@example.de",
+            "email": email,
             "address": "",
             "phone": "",
             "password": "sicheres-test-passwort",
@@ -172,6 +172,83 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(state["draft"], {})
         self.assertEqual(state["tips"]["200"], {"home": 3, "away": 1})
+
+    def test_admin_can_suspend_players_and_block_registration_names(self):
+        self.server.admin_username = "adminowner"
+        self.assertEqual(self.register("adminowner", "admin@example.de")[0], 201)
+        admin_cookie = self.cookie
+        self.cookie = None
+        self.assertEqual(self.register()[0], 201)
+        player_cookie = self.cookie
+        with self.server.database() as db:
+            player_id = db.execute("SELECT id FROM users WHERE username = 'TestTipp'").fetchone()["id"]
+
+        self.cookie = admin_cookie
+        status, admin_state = self.request("GET", "/api/state")
+        self.assertTrue(admin_state["me"]["isAdmin"])
+        status, data = self.request("GET", "/api/admin")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["users"]), 2)
+        admin_id = next(user["id"] for user in data["users"] if user["username"] == "adminowner")
+        status, error = self.request("POST", "/api/admin/user", {
+            "userId": admin_id,
+            "banned": True,
+        })
+        self.assertEqual(status, 400)
+        status, error = self.request("POST", "/api/admin/username", {
+            "username": "ADMINOWNER",
+            "blocked": True,
+        })
+        self.assertEqual(status, 400)
+
+        status, result = self.request("POST", "/api/admin/user", {
+            "userId": player_id,
+            "banned": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+
+        self.cookie = player_cookie
+        status, state = self.request("GET", "/api/state")
+        self.assertIsNone(state["me"])
+        self.assertEqual([entry["username"] for entry in state["leaderboard"]], ["adminowner"])
+        status, error = self.request("POST", "/api/tips", {
+            "tips": [{"matchId": 200, "home": 1, "away": 0}],
+        })
+        self.assertEqual(status, 401)
+
+        self.cookie = admin_cookie
+        status, result = self.request("POST", "/api/admin/username", {
+            "username": "BadName",
+            "blocked": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.cookie = None
+        status, error = self.register("BadName", "badname@example.de")
+        self.assertEqual(status, 400)
+        self.assertIn("nicht erlaubt", error["error"])
+
+        self.cookie = admin_cookie
+        status, result = self.request("POST", "/api/admin/user", {
+            "userId": player_id,
+            "banned": False,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.cookie = None
+        status, result = self.request("POST", "/api/login", {
+            "identity": "TestTipp",
+            "password": "sicheres-test-passwort",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+
+    def test_non_admin_cannot_access_moderation(self):
+        self.assertEqual(self.register()[0], 201)
+        status, error = self.request("GET", "/api/admin")
+        self.assertEqual(status, 403)
+        self.assertIn("Administration", error["error"])
 
     def test_tip_rejects_match_outside_current_round(self):
         self.assertEqual(self.register()[0], 201)

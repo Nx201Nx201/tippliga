@@ -145,6 +145,18 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
 .auth-toggle strong { color: var(--yellow); }
 .privacy-note { margin: 17px 0 0; color: #727168; text-align: center; font-size: 9px; }
 .form-error { min-height: 14px; margin: -4px 0 8px; color: #ff8f7c; font-size: 10px; }
+.admin-section { width: min(1120px, 89%); margin: 24px auto; padding: 24px; }
+.admin-section[hidden] { display: none; }
+.admin-heading { display: flex; justify-content: space-between; align-items: flex-start; }
+.admin-description { max-width: 720px; color: #aaa99f; font-size: 12px; line-height: 1.6; }
+.admin-list { display: grid; gap: 8px; margin: 14px 0; padding: 0; list-style: none; }
+.admin-list li { display: flex; justify-content: space-between; align-items: center; gap: 14px; min-height: 42px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; color: #deddd5; font-size: 12px; }
+.admin-list li span { overflow-wrap: anywhere; }
+.admin-list .button { min-height: 32px; flex: 0 0 auto; }
+.admin-list .admin-disabled { color: var(--muted); font-size: 10px; }
+.blocked-username-form { display: grid; gap: 9px; margin-top: 20px; color: #cfcec6; font-size: 11px; }
+.admin-form-row { display: flex; gap: 8px; }
+.admin-form-row input { width: min(100%, 320px); min-height: 40px; padding: 0 11px; border: 1px solid #42423c; border-radius: 5px; background: #131310; color: var(--white); }
 
 @media (max-width: 760px) {
   .topbar { height: 65px; padding: 0 20px; }
@@ -188,5 +200,8 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .score-home { grid-area: hscore; }.score-away { grid-area: ascore; }.score-separator { grid-area: sep; }
   .score-input { width: 34px; height: 34px; font-size: 12px; }
   .submit-row { flex-direction: column; align-items: stretch; gap: 12px; }.submit-hint { max-width: none; line-height: 1.6; }.submit-row .button { align-self: flex-start; }
+  .admin-section { width: calc(100% - 30px); padding: 18px; }
+  .admin-form-row { align-items: stretch; flex-direction: column; }
+  .admin-form-row input { width: 100%; }
   .footer { min-height: 68px; padding: 0 15px; font-size: 7px; letter-spacing: .7px; }.footer-brand { font-size: 13px; }
 }

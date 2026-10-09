@@ -15,6 +15,7 @@ import {
 const { Pool } = pg;
 const scrypt = promisify(scryptCallback);
 const sessionDays = 30;
+const adminUsername = (process.env.TIPPLIGA_ADMIN_USERNAME || "Nx201Nx201").toLowerCase();
 const fixtureCache = new Map();
 let pool;
 let schemaPromise;
@@ -29,8 +30,10 @@ CREATE TABLE IF NOT EXISTS users (
   address TEXT,
   phone TEXT,
   password_hash TEXT NOT NULL,
+  is_banned BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx ON users (lower(username));
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (lower(email));
 CREATE TABLE IF NOT EXISTS sessions (
@@ -56,6 +59,10 @@ CREATE TABLE IF NOT EXISTS tip_drafts (
   predictions JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id, season, matchday)
+);
+CREATE TABLE IF NOT EXISTS blocked_usernames (
+  username TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS login_attempts (
   id BIGSERIAL PRIMARY KEY,
@@ -143,12 +150,13 @@ async function currentUser(request) {
   if (!token) return null;
   const db = await readyDatabase();
   const result = await db.query(
-    `SELECT u.id, u.username, u.email, u.first_name, u.last_name
+    `SELECT u.id, u.username, u.email, u.first_name, u.last_name, u.is_banned
      FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.expires_at > NOW()`,
+     WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_banned = FALSE`,
     [hash(token)],
   );
-  return result.rows[0] || null;
+  const user = result.rows[0];
+  return user ? { ...user, isAdmin: user.username.toLowerCase() === adminUsername } : null;
 }
 
 async function issueSession(userId) {
@@ -196,6 +204,7 @@ async function stateFor(request) {
   const leaderboard = await db.query(
     `SELECT u.id, u.username, COUNT(DISTINCT t.matchday)::int AS matchdays
      FROM users u LEFT JOIN tips t ON t.user_id = u.id AND t.season = $1
+     WHERE u.is_banned = FALSE
      GROUP BY u.id ORDER BY lower(u.username)`,
     [season],
   );
@@ -250,6 +259,7 @@ async function stateFor(request) {
       username: user.username,
       firstName: user.first_name,
       lastName: user.last_name,
+      isAdmin: user.isAdmin,
     } : null,
     tips: Object.fromEntries(tips.rows.map((tip) => [String(tip.match_id), {
       home: tip.home_goals,
@@ -270,6 +280,11 @@ async function register(data) {
   });
   const encodedPassword = `scrypt$${passwordSalt.toString("hex")}$${Buffer.from(passwordKey).toString("hex")}`;
   const db = await readyDatabase();
+  const blocked = await db.query(
+    "SELECT 1 FROM blocked_usernames WHERE username = lower($1)",
+    [fields.username],
+  );
+  if (blocked.rowCount) return json({ error: "Dieser Benutzername ist nicht erlaubt." }, 400);
   const client = await db.connect();
   let inTransaction = false;
   try {
@@ -341,13 +356,16 @@ async function login(data, request) {
   }
   const db = await readyDatabase();
   const result = await db.query(
-    `SELECT id, username, password_hash FROM users
+    `SELECT id, username, password_hash, is_banned FROM users
      WHERE lower(username) = lower($1) OR lower(email) = lower($1)`,
     [identity],
   );
   const user = result.rows[0];
   if (!user || !await verifyPassword(password, user.password_hash)) {
     return json({ error: "Anmeldedaten stimmen nicht." }, 401);
+  }
+  if (user.is_banned) {
+    return json({ error: "Dieses Konto wurde von der Administration gesperrt." }, 403);
   }
   const setCookie = await issueSession(user.id);
   return json({ ok: true, username: user.username }, 200, { "Set-Cookie": setCookie });
@@ -535,6 +553,87 @@ async function saveDraft(data, request) {
   }
 }
 
+async function adminUser(request) {
+  const user = await currentUser(request);
+  return user?.isAdmin ? user : null;
+}
+
+async function adminData(request) {
+  if (!await adminUser(request)) {
+    return json({ error: "Nur die Administration darf diese Funktion verwenden." }, 403);
+  }
+  const db = await readyDatabase();
+  const [users, blocked] = await Promise.all([
+    db.query("SELECT id, username, is_banned FROM users ORDER BY lower(username)"),
+    db.query("SELECT username FROM blocked_usernames ORDER BY username"),
+  ]);
+  return json({
+    users: users.rows.map((user) => ({
+      id: user.id,
+      username: user.username,
+      isBanned: user.is_banned,
+    })),
+    blockedUsernames: blocked.rows.map((row) => row.username),
+  });
+}
+
+async function setUserBan(data, request) {
+  const admin = await adminUser(request);
+  if (!admin) {
+    return json({ error: "Nur die Administration darf diese Funktion verwenden." }, 403);
+  }
+  if (!Number.isSafeInteger(data.userId) || data.userId < 1 || typeof data.banned !== "boolean") {
+    return json({ error: "Ungültige Spielersperre." }, 400);
+  }
+  const db = await readyDatabase();
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const target = await client.query("SELECT username FROM users WHERE id = $1 FOR UPDATE", [data.userId]);
+    if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return json({ error: "Spielerkonto nicht gefunden." }, 404);
+    }
+    if (target.rows[0].username.toLowerCase() === adminUsername && data.banned) {
+      await client.query("ROLLBACK");
+      return json({ error: "Das Administratorkonto kann nicht gesperrt werden." }, 400);
+    }
+    await client.query("UPDATE users SET is_banned = $1 WHERE id = $2", [data.banned, data.userId]);
+    if (data.banned) await client.query("DELETE FROM sessions WHERE user_id = $1", [data.userId]);
+    await client.query("COMMIT");
+    return json({ ok: true });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function setBlockedUsername(data, request) {
+  if (!await adminUser(request)) {
+    return json({ error: "Nur die Administration darf diese Funktion verwenden." }, 403);
+  }
+  if (typeof data.username !== "string" || !/^[A-Za-z0-9_.-]{3,24}$/.test(data.username)
+      || typeof data.blocked !== "boolean") {
+    return json({ error: "Ungültiger Benutzername." }, 400);
+  }
+  const normalized = data.username.toLowerCase();
+  if (normalized === adminUsername && data.blocked) {
+    return json({ error: "Der Administratorname kann nicht blockiert werden." }, 400);
+  }
+  const db = await readyDatabase();
+  if (data.blocked) {
+    await db.query(
+      "INSERT INTO blocked_usernames (username) VALUES ($1) ON CONFLICT (username) DO NOTHING",
+      [normalized],
+    );
+  } else {
+    await db.query("DELETE FROM blocked_usernames WHERE username = $1", [normalized]);
+  }
+  return json({ ok: true });
+}
+
 async function handle(request) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -555,6 +654,14 @@ async function handle(request) {
       return json({
         error: "Der aktuelle Bundesliga-Spielplan oder die Datenbank ist gerade nicht verfügbar.",
       }, 502);
+    }
+  }
+  if (request.method === "GET" && path === "/api/admin") {
+    try {
+      return await adminData(request);
+    } catch (error) {
+      console.error("Admin moderation data failed:", error);
+      return json({ error: "Moderationsdaten konnten nicht geladen werden." }, 500);
     }
   }
   if (path.startsWith("/api/") && request.method === "POST") {
@@ -614,6 +721,22 @@ async function handle(request) {
       } catch (error) {
         console.error("Saving tip draft failed:", error);
         return json({ error: "Tipp-Entwurf konnte nicht gespeichert werden." }, 502);
+      }
+    }
+    if (path === "/api/admin/user") {
+      try {
+        return await setUserBan(data, request);
+      } catch (error) {
+        console.error("Updating player suspension failed:", error);
+        return json({ error: "Spielersperre konnte nicht gespeichert werden." }, 500);
+      }
+    }
+    if (path === "/api/admin/username") {
+      try {
+        return await setBlockedUsername(data, request);
+      } catch (error) {
+        console.error("Updating blocked username failed:", error);
+        return json({ error: "Benutzername konnte nicht gespeichert werden." }, 500);
       }
     }
   }

@@ -54,6 +54,7 @@ SCHEMA_SQLITE = (
     address TEXT,
     phone TEXT,
     password_hash TEXT NOT NULL,
+    is_banned INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );""",
     """CREATE TABLE IF NOT EXISTS sessions (
@@ -79,6 +80,10 @@ SCHEMA_SQLITE = (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(user_id, season, matchday)
 );""",
+    """CREATE TABLE IF NOT EXISTS blocked_usernames (
+    username TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+);""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
@@ -92,6 +97,7 @@ SCHEMA_POSTGRES = (
     address TEXT,
     phone TEXT,
     password_hash TEXT NOT NULL,
+    is_banned BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TEXT NOT NULL
 );""",
     """CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx
@@ -120,6 +126,10 @@ SCHEMA_POSTGRES = (
     predictions JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY(user_id, season, matchday)
+);""",
+    """CREATE TABLE IF NOT EXISTS blocked_usernames (
+    username TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
 );""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
@@ -318,6 +328,7 @@ class TippligaServer(ThreadingHTTPServer):
 
     def __init__(self, address, handler, db_path=DEFAULT_DB, fixture_feed=None):
         self.database_url = os.environ.get("DATABASE_URL")
+        self.admin_username = os.environ.get("TIPPLIGA_ADMIN_USERNAME", "Nx201Nx201").casefold()
         self.db_path = Path(db_path)
         if not self.database_url:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,6 +339,14 @@ class TippligaServer(ThreadingHTTPServer):
             schema = SCHEMA_POSTGRES if self.database_url else SCHEMA_SQLITE
             for statement in schema:
                 db.execute(statement)
+            if self.database_url:
+                db.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            else:
+                columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+                if "is_banned" not in columns:
+                    db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
         super().__init__(address, handler)
 
     def connect(self):
@@ -426,7 +445,8 @@ class Handler(SimpleHTTPRequestHandler):
                 """SELECT users.id, users.username, users.email, users.first_name,
                           users.last_name
                    FROM sessions JOIN users ON users.id = sessions.user_id
-                   WHERE sessions.token_hash = ? AND sessions.expires_at > ?""",
+                   WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+                     AND users.is_banned = FALSE""",
                 (digest, datetime.now(timezone.utc).isoformat()),
             ).fetchone()
 
@@ -479,6 +499,7 @@ class Handler(SimpleHTTPRequestHandler):
             leaderboard = db.execute(
                 """SELECT u.id, u.username, COUNT(DISTINCT t.matchday) AS matchdays
                    FROM users u LEFT JOIN tips t ON t.user_id = u.id AND t.season = ?
+                   WHERE u.is_banned = FALSE
                    GROUP BY u.id ORDER BY lower(u.username)""",
                 (season_for(datetime.now(BERLIN).date()),),
             ).fetchall()
@@ -534,6 +555,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "username": user["username"],
                 "firstName": user["first_name"],
                 "lastName": user["last_name"],
+                "isAdmin": user["username"].casefold() == self.server.admin_username,
             } if user else None,
             "tips": {str(tip["match_id"]): {
                 "home": tip["home_goals"], "away": tip["away_goals"]
@@ -583,6 +605,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "error": f"Der aktuelle Bundesliga-Spielplan ist gerade nicht verfügbar: {exc}"
                 })
             return
+        if path == "/api/admin":
+            self._admin_data()
+            return
         if path.startswith("/api/"):
             self._json(HTTPStatus.NOT_FOUND, {"error": "API-Endpunkt nicht gefunden."})
             return
@@ -601,7 +626,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
-        if path in {"/api/register", "/api/login", "/api/logout", "/api/tips", "/api/draft"}:
+        if path in {
+            "/api/register", "/api/login", "/api/logout", "/api/tips", "/api/draft",
+            "/api/admin/user", "/api/admin/username",
+        }:
             origin = self.headers.get("Origin")
             host = self.headers.get("Host")
             if origin and host and urlsplit(origin).netloc != host:
@@ -618,6 +646,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._save_tips(data)
         elif path == "/api/draft":
             self._save_draft(data)
+        elif path == "/api/admin/user":
+            self._set_user_ban(data)
+        elif path == "/api/admin/username":
+            self._set_blocked_username(data)
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "API-Endpunkt nicht gefunden."})
 
@@ -646,6 +678,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Adresse oder Telefonnummer ist zu lang."})
             return
         try:
+            with self.server.database() as db:
+                blocked = db.execute(
+                    "SELECT 1 FROM blocked_usernames WHERE username = ?",
+                    (username.casefold(),),
+                ).fetchone()
+            if blocked:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Dieser Benutzername ist nicht erlaubt."})
+                return
             encoded_password = password_hash(password)
             with self.server.database() as db:
                 cursor = db.execute(
@@ -675,15 +715,100 @@ class Handler(SimpleHTTPRequestHandler):
             return
         with self.server.database() as db:
             user = db.execute(
-                """SELECT id, username, password_hash FROM users
+                """SELECT id, username, password_hash, is_banned FROM users
                    WHERE lower(username) = lower(?) OR lower(email) = lower(?)""",
                 (identity, identity),
             ).fetchone()
         if not user or not password_matches(password, user["password_hash"]):
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "Anmeldedaten stimmen nicht."})
             return
+        if user["is_banned"]:
+            self._json(HTTPStatus.FORBIDDEN, {"error": "Dieses Konto wurde von der Administration gesperrt."})
+            return
         self._json(HTTPStatus.OK, {"ok": True, "username": user["username"]},
                    self._set_session(user["id"]))
+
+    def _admin_user(self):
+        user = self._current_user()
+        return user if user and user["username"].casefold() == self.server.admin_username else None
+
+    def _admin_data(self):
+        try:
+            if not self._admin_user():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Nur die Administration darf diese Funktion verwenden."})
+                return
+            with self.server.database() as db:
+                users = db.execute(
+                    "SELECT id, username, is_banned FROM users ORDER BY lower(username)"
+                ).fetchall()
+                blocked = db.execute(
+                    "SELECT username FROM blocked_usernames ORDER BY username"
+                ).fetchall()
+            self._json(HTTPStatus.OK, {
+                "users": [{
+                    "id": row["id"],
+                    "username": row["username"],
+                    "isBanned": bool(row["is_banned"]),
+                } for row in users],
+                "blockedUsernames": [row["username"] for row in blocked],
+            })
+        except DATABASE_ERRORS as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Moderationsdaten konnten nicht geladen werden: {exc}"})
+
+    def _set_user_ban(self, data: dict):
+        user_id = data.get("userId")
+        banned = data.get("banned")
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or not isinstance(banned, bool):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Ungültige Spielersperre."})
+            return
+        try:
+            if not self._admin_user():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Nur die Administration darf diese Funktion verwenden."})
+                return
+            with self.server.database() as db:
+                target = db.execute(
+                    "SELECT username FROM users WHERE id = ?",
+                    (user_id,),
+                ).fetchone()
+                if not target:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Spielerkonto nicht gefunden."})
+                    return
+                if target["username"].casefold() == self.server.admin_username and banned:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Das Administratorkonto kann nicht gesperrt werden."})
+                    return
+                db.execute("UPDATE users SET is_banned = ? WHERE id = ?", (banned, user_id))
+                if banned:
+                    db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            self._json(HTTPStatus.OK, {"ok": True})
+        except DATABASE_ERRORS as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Spielersperre konnte nicht gespeichert werden: {exc}"})
+
+    def _set_blocked_username(self, data: dict):
+        username = data.get("username")
+        blocked = data.get("blocked")
+        if not isinstance(username, str) or not USERNAME_RE.fullmatch(username) or not isinstance(blocked, bool):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Ungültiger Benutzername."})
+            return
+        try:
+            if not self._admin_user():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Nur die Administration darf diese Funktion verwenden."})
+                return
+            normalized = username.casefold()
+            if normalized == self.server.admin_username and blocked:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Der Administratorname kann nicht blockiert werden."})
+                return
+            with self.server.database() as db:
+                if blocked:
+                    db.execute(
+                        "INSERT INTO blocked_usernames(username, created_at) VALUES (?, ?) "
+                        "ON CONFLICT(username) DO NOTHING",
+                        (normalized, datetime.now(timezone.utc).isoformat()),
+                    )
+                else:
+                    db.execute("DELETE FROM blocked_usernames WHERE username = ?", (normalized,))
+            self._json(HTTPStatus.OK, {"ok": True})
+        except DATABASE_ERRORS as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Benutzername konnte nicht gespeichert werden: {exc}"})
 
     def _save_tips(self, data: dict):
         user = self._current_user()

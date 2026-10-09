@@ -279,6 +279,7 @@ function renderAccount() {
   const button = document.querySelector("#account-button");
   const welcome = document.querySelector("#welcome-label");
   const note = document.querySelector("#tip-login-note");
+  document.querySelector("#admin-panel").hidden = !state?.me?.isAdmin;
   if (state?.me) {
     button.textContent = "Abmelden";
     welcome.textContent = `Hi, ${state.me.firstName}`;
@@ -348,6 +349,7 @@ async function refresh() {
   try {
     state = await api("/api/state");
     render();
+    await refreshAdminPanel();
   } catch (error) {
     fixturesList.replaceChildren();
     const message = document.createElement("p");
@@ -358,6 +360,100 @@ async function refresh() {
     submitStatus.textContent = error.message;
   }
 }
+
+async function refreshAdminPanel() {
+  const panel = document.querySelector("#admin-panel");
+  if (panel.hidden) return;
+  const status = document.querySelector("#admin-status");
+  try {
+    const data = await api("/api/admin");
+    const users = document.querySelector("#admin-users");
+    users.replaceChildren(...data.users.map((user) => {
+      const row = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = user.username;
+      if (user.username.toLowerCase() === state.me.username.toLowerCase()) {
+        const label = document.createElement("span");
+        label.className = "admin-disabled";
+        label.textContent = "Administratorkonto";
+        row.append(name, label);
+        return row;
+      }
+      const button = document.createElement("button");
+      button.className = "button button-outline";
+      button.type = "button";
+      button.dataset.userId = String(user.id);
+      button.dataset.banned = String(user.isBanned);
+      button.textContent = user.isBanned ? "Entsperren" : "Sperren";
+      row.append(name, button);
+      return row;
+    }));
+    const blockedNames = document.querySelector("#blocked-username-list");
+    blockedNames.replaceChildren(...data.blockedUsernames.map((username) => {
+      const row = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = username;
+      const button = document.createElement("button");
+      button.className = "button button-outline";
+      button.type = "button";
+      button.dataset.unblockUsername = username;
+      button.textContent = "Freigeben";
+      row.append(name, button);
+      return row;
+    }));
+    status.textContent = "";
+  } catch (error) {
+    console.error("Could not load admin moderation data:", error);
+    status.textContent = error.message;
+  }
+}
+
+document.querySelector("#admin-users").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-user-id]");
+  if (!button) return;
+  const status = document.querySelector("#admin-status");
+  try {
+    await api("/api/admin/user", {
+      userId: Number(button.dataset.userId),
+      banned: button.dataset.banned !== "true",
+    });
+    await refresh();
+    status.textContent = "Spielerkonto aktualisiert.";
+  } catch (error) {
+    status.textContent = error.message;
+  }
+});
+
+document.querySelector("#blocked-username-list").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-unblock-username]");
+  if (!button) return;
+  const status = document.querySelector("#admin-status");
+  try {
+    await api("/api/admin/username", {
+      username: button.dataset.unblockUsername,
+      blocked: false,
+    });
+    status.textContent = "Benutzername wieder freigegeben.";
+    await refreshAdminPanel();
+  } catch (error) {
+    status.textContent = error.message;
+  }
+});
+
+document.querySelector("#blocked-username-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const username = new FormData(form).get("username").trim();
+  const status = document.querySelector("#admin-status");
+  try {
+    await api("/api/admin/username", { username, blocked: true });
+    form.reset();
+    status.textContent = "Benutzername für neue Registrierungen gesperrt.";
+    await refreshAdminPanel();
+  } catch (error) {
+    status.textContent = error.message;
+  }
+});
 
 function openAuth(mode = "login") {
   authMode = mode;

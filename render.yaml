@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: tippliga
+    runtime: python
+    plan: starter
+    buildCommand: python -m compileall -q .
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    disk:
+      name: tippliga-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: TIPPLIGA_HOST
+        value: 0.0.0.0
+      - key: TIPPLIGA_DB
+        value: /var/data/tippliga.sqlite3
+      - key: COOKIE_SECURE
+        value: "1"

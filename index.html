@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#11110f">
+    <meta name="description" content="Tippliga – deine Bundesliga-Tipps, deine Liga, dein Spieltag.">
+    <title>Tippliga — Die Liga für deine Tipps</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Tippliga Startseite">
+        <span class="brand-mark" aria-hidden="true">T<span>.</span></span>
+        <span>tipp<span class="brand-light">liga</span></span>
+      </a>
+      <nav class="main-nav" aria-label="Hauptnavigation">
+        <a class="nav-link active" href="#rangliste">Rangliste</a>
+        <a class="nav-link" href="#tippen">Tipps abgeben</a>
+      </nav>
+      <div class="account-area">
+        <span id="welcome-label" class="welcome-label"></span>
+        <button id="account-button" class="button button-outline" type="button">Anmelden</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="live-dot"></span> DIE TIPPLIGA ZUR BUNDESLIGA</div>
+          <h1>Zeig, was in<br>deinen Tipps <span>steckt.</span></h1>
+          <p>Tippe den Spieltag. Sammle Punkte. Hol dir den Platz ganz oben.</p>
+          <a class="button button-yellow" href="#tippen">Jetzt Spieltag tippen <span aria-hidden="true">↗</span></a>
+        </div>
+        <div class="hero-score" id="round-widget" aria-label="Spieltag wird geladen">
+          <div class="score-orbit orbit-one"></div>
+          <div class="score-orbit orbit-two"></div>
+          <div class="hero-ball" aria-hidden="true">⚽</div>
+          <div class="round-label">DER NÄCHSTE<br>SPIELTAG</div>
+          <div class="round-number" id="hero-round">—<span>.</span></div>
+          <div class="hero-caption">Dein Moment ist jetzt.</div>
+        </div>
+        <div class="hero-bottom"><span>01 — 34 SPIELTAGE</span><span>DEINE TIPPS. DEINE LIGA.</span></div>
+      </section>
+
+      <section class="content-grid" id="rangliste">
+        <div class="standings-panel panel">
+          <div class="section-heading">
+            <div>
+              <div class="eyebrow muted">DIE TIPPLIGA · WER MACHT DAS RENNEN?</div>
+              <h2>Die Rangliste<span class="yellow-dot">.</span></h2>
+            </div>
+            <span class="season-pill"><span class="season-dot"></span> SAISON <span id="season-label">—</span></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>PLATZ</th><th>TIPPER:IN</th><th>SPIELTAGE</th><th>PUNKTE</th></tr>
+              </thead>
+              <tbody id="leaderboard-body"></tbody>
+            </table>
+          </div>
+          <div class="table-footer"><span id="player-count"></span><span>JEDER TIPP ZÄHLT <span class="footer-arrow">↗</span></span></div>
+        </div>
+
+        <aside class="side-column">
+          <div class="next-match-card panel">
+            <div class="eyebrow muted" id="next-match-label">NÄCHSTES SPIEL</div>
+            <div class="match-day" id="next-match-time">Spielplan wird geladen …</div>
+            <div class="matchup">
+              <div class="team"><span class="team-badge badge-blue" id="next-home-badge">–</span><span id="next-home">–</span></div>
+              <span class="versus">VS</span>
+              <div class="team"><span class="team-badge badge-red" id="next-away-badge">–</span><span id="next-away">–</span></div>
+            </div>
+            <a class="text-link" href="#tippen">Spieltag ansehen <span>→</span></a>
+          </div>
+          <div class="points-card">
+            <div class="points-icon">✳</div>
+            <div>
+              <div class="eyebrow">DAS PUNKTE-SYSTEM</div>
+              <h3>Dein Riecher<br>zahlt sich aus.</h3>
+              <div class="points-rules">
+                <span><b>3</b> Punkte <i>Exakter Tipp</i></span>
+                <span><b>1</b> Punkt <i>Richtige Tendenz</i></span>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="tips-section" id="tippen">
+        <div class="tips-heading">
+          <div>
+            <div class="eyebrow muted" id="matchday-label">DEIN GEFÜHL. DEIN TIPP.</div>
+            <h2>Der Spieltag wartet<span class="yellow-dot">.</span></h2>
+          </div>
+          <span class="lock-note" id="tip-login-note">Spielplan wird geladen …</span>
+        </div>
+        <div id="fixtures-list" class="fixtures-list"></div>
+        <div class="submit-row">
+          <span class="submit-hint">Deine Tipps werden sicher auf dem Tippliga-Server gespeichert. Benachrichtigung an <strong>nx201nx201@outlook.de</strong>.</span>
+          <button id="submit-tips" class="button button-yellow" type="button">Tipps abschicken <span aria-hidden="true">↗</span></button>
+        </div>
+        <p id="submit-status" class="submit-status" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a class="brand footer-brand" href="#"><span class="brand-mark" aria-hidden="true">T<span>.</span></span><span>tipp<span class="brand-light">liga</span></span></a>
+      <span>GUTE TIPPS. GUTE ZEIT.</span>
+      <span>© 2026 TIPPLIGA</span>
+    </footer>
+
+    <dialog id="auth-dialog" class="auth-dialog">
+      <form id="auth-form" class="auth-card">
+        <button id="close-dialog" class="close-dialog" type="button" aria-label="Schließen">×</button>
+        <div class="eyebrow muted">DEIN PLATZ IN DER LIGA</div>
+        <h2 id="auth-title">Willkommen<br>zurück<span class="yellow-dot">.</span></h2>
+        <p id="auth-description" class="auth-description">Melde dich an und bring deine Tipps ins Spiel.</p>
+        <div class="auth-field">
+          <label for="username">Benutzername <span id="login-identity-label"></span></label>
+          <input id="username" name="username" autocomplete="username" minlength="3" maxlength="254" required placeholder="Benutzername oder E-Mail">
+        </div>
+        <div class="auth-field" data-register-only hidden>
+          <label for="first-name">Vorname</label>
+          <input id="first-name" name="firstName" autocomplete="given-name" maxlength="80" required placeholder="Dein Vorname">
+        </div>
+        <div class="auth-field" data-register-only hidden>
+          <label for="last-name">Nachname</label>
+          <input id="last-name" name="lastName" autocomplete="family-name" maxlength="80" required placeholder="Dein Nachname">
+        </div>
+        <div class="auth-field" data-register-only hidden>
+          <label for="email">E-Mail-Adresse</label>
+          <input id="email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="du@beispiel.de">
+        </div>
+        <div class="auth-field" data-register-only hidden>
+          <label for="address">Adresse <span class="optional-label">optional</span></label>
+          <input id="address" name="address" autocomplete="street-address" maxlength="240" placeholder="Straße und Hausnummer">
+        </div>
+        <div class="auth-field" data-register-only hidden>
+          <label for="phone">Telefon <span class="optional-label">optional</span></label>
+          <input id="phone" name="phone" type="tel" autocomplete="tel" maxlength="40" placeholder="+49 …">
+        </div>
+        <div class="auth-field">
+        <label for="password">Passwort</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" minlength="10" maxlength="256" required placeholder="Mindestens 10 Zeichen">
+        </div>
+        <p id="auth-error" class="form-error" role="alert"></p>
+        <button id="auth-submit" class="button button-yellow auth-submit" type="submit">Anmelden <span aria-hidden="true">→</span></button>
+        <button id="auth-toggle" class="auth-toggle" type="button">Noch kein Konto? <strong>Jetzt registrieren</strong></button>
+        <p class="privacy-note">Deine Kontodaten und Tipps werden auf dem Tippliga-Server gespeichert.</p>
+      </form>
+    </dialog>
+  </body>
+</html>

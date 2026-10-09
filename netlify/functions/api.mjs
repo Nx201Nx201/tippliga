@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS tips (
   PRIMARY KEY (user_id, season, match_id)
 );
 CREATE INDEX IF NOT EXISTS tips_season_idx ON tips (season, match_id);
+CREATE TABLE IF NOT EXISTS tip_drafts (
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  season INTEGER NOT NULL,
+  matchday TEXT NOT NULL,
+  predictions JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, season, matchday)
+);
 CREATE TABLE IF NOT EXISTS login_attempts (
   id BIGSERIAL PRIMARY KEY,
   client_hash TEXT NOT NULL,
@@ -202,6 +210,19 @@ async function stateFor(request) {
     "SELECT user_id, match_id, home_goals, away_goals FROM tips WHERE season = $1",
     [season],
   );
+  const draftResult = user
+    ? await db.query(
+      `SELECT predictions FROM tip_drafts
+       WHERE user_id = $1 AND season = $2 AND matchday = $3`,
+      [user.id, season, group.groupName],
+    )
+    : { rows: [] };
+  if (user) {
+    await db.query(
+      "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday <> $3",
+      [user.id, season, group.groupName],
+    );
+  }
   const results = new Map(matches.map((match) => [Number(match.matchID), resultOf(match)]));
   const userScores = new Map();
   for (const tip of allTips.rows) {
@@ -234,6 +255,7 @@ async function stateFor(request) {
       home: tip.home_goals,
       away: tip.away_goals,
     }])),
+    draft: draftResult.rows[0]?.predictions || {},
   };
 }
 
@@ -409,15 +431,108 @@ async function saveTips(data, request) {
     const offset = index * 6;
     return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`;
   }).join(", ");
-  await db.query(
-    `INSERT INTO tips (user_id, season, match_id, matchday, home_goals, away_goals)
-     VALUES ${valuePlaceholders}
-     ON CONFLICT (user_id, season, match_id) DO UPDATE SET
-       home_goals = EXCLUDED.home_goals, away_goals = EXCLUDED.away_goals, updated_at = NOW()`,
-    rows.flat(),
-  );
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const saved = await client.query(
+      `INSERT INTO tips (user_id, season, match_id, matchday, home_goals, away_goals)
+       VALUES ${valuePlaceholders}
+       ON CONFLICT (user_id, season, match_id) DO NOTHING`,
+      rows.flat(),
+    );
+    if (saved.rowCount !== rows.length) {
+      await client.query("ROLLBACK");
+      return json({
+        error: "Ein oder mehrere Tipps wurden bereits abgegeben und können nicht mehr geändert werden.",
+      }, 409);
+    }
+    await client.query(
+      "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday = $3",
+      [user.id, season, group.groupName],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
   const emailStatus = await sendTipEmail(user.username, group.groupName, lines);
   return json({ ok: true, emailStatus });
+}
+
+async function saveDraft(data, request) {
+  const user = await currentUser(request);
+  if (!user) return json({ error: "Bitte melde dich zuerst an." }, 401);
+  const submitted = data.predictions;
+  if (!Array.isArray(submitted) || submitted.length > 20) {
+    return json({ error: "Ungültiger Tipp-Entwurf." }, 400);
+  }
+  const season = seasonFor();
+  const matches = await fixturesFor(season);
+  const { group, matches: activeMatches } = currentMatchday(matches);
+  const currentById = new Map(activeMatches.map((match) => [Number(match.matchID), match]));
+  const predictions = {};
+  const seen = new Set();
+  const now = Date.now();
+
+  for (const item of submitted) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+        || !Number.isSafeInteger(item.matchId) || seen.has(item.matchId)) {
+      return json({ error: "Ungültiger Tipp-Entwurf." }, 400);
+    }
+    seen.add(item.matchId);
+    const match = currentById.get(item.matchId);
+    if (!match) return json({ error: "Ein Tipp gehört nicht zum aktuellen Spieltag." }, 400);
+    if (match.matchIsFinished || new Date(match.matchDateTimeUTC).getTime() <= now) {
+      return json({ error: "Ein bereits begonnenes Spiel kann nicht als Entwurf gespeichert werden." }, 400);
+    }
+    const scores = {};
+    for (const side of ["home", "away"]) {
+      const value = item[side];
+      if (value === null || value === undefined || value === "") continue;
+      const score = typeof value === "number" ? value : Number(value);
+      if (!Number.isSafeInteger(score) || score < 0 || score > 20
+          || String(score) !== String(value)) {
+        return json({ error: "Ergebnisse müssen ganze Zahlen zwischen 0 und 20 sein." }, 400);
+      }
+      scores[side] = score;
+    }
+    if (Object.keys(scores).length) predictions[String(item.matchId)] = scores;
+  }
+
+  const db = await readyDatabase();
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const locked = await client.query(
+      `SELECT match_id FROM tips
+       WHERE user_id = $1 AND season = $2 AND match_id = ANY($3::bigint[])`,
+      [user.id, season, Object.keys(predictions)],
+    );
+    for (const row of locked.rows) delete predictions[String(row.match_id)];
+    if (Object.keys(predictions).length) {
+      await client.query(
+        `INSERT INTO tip_drafts (user_id, season, matchday, predictions, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, NOW())
+         ON CONFLICT (user_id, season, matchday) DO UPDATE SET
+           predictions = EXCLUDED.predictions, updated_at = NOW()`,
+        [user.id, season, group.groupName, JSON.stringify(predictions)],
+      );
+    } else {
+      await client.query(
+        "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday = $3",
+        [user.id, season, group.groupName],
+      );
+    }
+    await client.query("COMMIT");
+    return json({ ok: true });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function handle(request) {
@@ -491,6 +606,14 @@ async function handle(request) {
       } catch (error) {
         console.error("Saving tips failed:", error);
         return json({ error: "Tipps konnten nicht sicher gespeichert werden." }, 502);
+      }
+    }
+    if (path === "/api/draft") {
+      try {
+        return await saveDraft(data, request);
+      } catch (error) {
+        console.error("Saving tip draft failed:", error);
+        return json({ error: "Tipp-Entwurf konnte nicht gespeichert werden." }, 502);
       }
     }
   }

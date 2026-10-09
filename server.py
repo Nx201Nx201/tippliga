@@ -71,6 +71,14 @@ SCHEMA_SQLITE = (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(user_id, season, match_id)
 );""",
+    """CREATE TABLE IF NOT EXISTS tip_drafts (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    season INTEGER NOT NULL,
+    matchday TEXT NOT NULL,
+    predictions TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, season, matchday)
+);""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
@@ -105,6 +113,14 @@ SCHEMA_POSTGRES = (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(user_id, season, match_id)
 );""",
+    """CREATE TABLE IF NOT EXISTS tip_drafts (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    season INTEGER NOT NULL,
+    matchday TEXT NOT NULL,
+    predictions JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(user_id, season, matchday)
+);""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
@@ -112,6 +128,10 @@ DATABASE_ERRORS = (sqlite3.Error,) + ((psycopg.Error,) if psycopg else ())
 DATABASE_INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + (
     (psycopg.IntegrityError,) if psycopg else ()
 )
+
+
+class TipsAlreadyLockedError(Exception):
+    pass
 
 
 def season_for(day: date) -> int:
@@ -463,12 +483,26 @@ class Handler(SimpleHTTPRequestHandler):
                 (season_for(datetime.now(BERLIN).date()),),
             ).fetchall()
             tips = []
+            draft = {}
             if user:
                 tips = [dict(row) for row in db.execute(
                     """SELECT match_id, home_goals, away_goals FROM tips
                        WHERE user_id = ? AND season = ? AND matchday = ?""",
                     (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
                 )]
+                draft_row = db.execute(
+                    """SELECT predictions FROM tip_drafts
+                       WHERE user_id = ? AND season = ? AND matchday = ?""",
+                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                ).fetchone()
+                db.execute(
+                    "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday != ?",
+                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                )
+                if draft_row:
+                    draft = json.loads(draft_row["predictions"]) if isinstance(
+                        draft_row["predictions"], str
+                    ) else draft_row["predictions"]
             all_tips = db.execute(
                 """SELECT user_id, match_id, home_goals, away_goals FROM tips
                    WHERE season = ?""",
@@ -504,6 +538,7 @@ class Handler(SimpleHTTPRequestHandler):
             "tips": {str(tip["match_id"]): {
                 "home": tip["home_goals"], "away": tip["away_goals"]
             } for tip in tips},
+            "draft": draft,
         }
 
     def _send_tip_email(self, username: str, matchday: str, lines: list[str]):
@@ -566,7 +601,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
-        if path in {"/api/register", "/api/login", "/api/logout", "/api/tips"}:
+        if path in {"/api/register", "/api/login", "/api/logout", "/api/tips", "/api/draft"}:
             origin = self.headers.get("Origin")
             host = self.headers.get("Host")
             if origin and host and urlsplit(origin).netloc != host:
@@ -581,6 +616,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"ok": True}, self._clear_session(self._session_token()))
         elif path == "/api/tips":
             self._save_tips(data)
+        elif path == "/api/draft":
+            self._save_draft(data)
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "API-Endpunkt nicht gefunden."})
 
@@ -689,24 +726,106 @@ class Handler(SimpleHTTPRequestHandler):
                     f'{match["team1"]["shortName"]} {home}:{away} {match["team2"]["shortName"]}'
                 )
             with self.server.database() as db:
-                db.executemany(
+                cursor = db.executemany(
                     """INSERT INTO tips(user_id, season, match_id, matchday, home_goals,
                                         away_goals, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(user_id, season, match_id) DO UPDATE SET
-                         home_goals = excluded.home_goals, away_goals = excluded.away_goals,
-                         updated_at = excluded.updated_at""",
+                       ON CONFLICT(user_id, season, match_id) DO NOTHING""",
                     values,
+                )
+                if cursor.rowcount != len(values):
+                    raise TipsAlreadyLockedError
+                db.execute(
+                    "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday = ?",
+                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
                 )
             email_status = self._send_tip_email(user["username"], group["groupName"], lines)
             self._json(HTTPStatus.OK, {
                 "ok": True,
                 "emailStatus": email_status,
             })
+        except TipsAlreadyLockedError:
+            self._json(HTTPStatus.CONFLICT, {
+                "error": "Ein oder mehrere Tipps wurden bereits abgegeben und können nicht mehr geändert werden."
+            })
         except (ValueError, KeyError, TypeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "Ungültiger Tipp."})
         except (OSError, urllib.error.URLError, TimeoutError, *DATABASE_ERRORS) as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Tipps konnten nicht sicher gespeichert werden: {exc}"})
+
+    def _save_draft(self, data: dict):
+        user = self._current_user()
+        if not user:
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "Bitte melde dich zuerst an."})
+            return
+        submitted = data.get("predictions")
+        if not isinstance(submitted, list) or len(submitted) > 20:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Ungültiger Tipp-Entwurf."})
+            return
+        try:
+            matches = self._season_matches()
+            group, active_matches = current_matchday(matches)
+            current_by_id = {int(match["matchID"]): match for match in active_matches}
+            predictions = {}
+            now = datetime.now(timezone.utc)
+            for item in submitted:
+                if not isinstance(item, dict):
+                    raise ValueError("Ungültiger Tipp-Entwurf.")
+                match_id = item.get("matchId")
+                if isinstance(match_id, bool) or not isinstance(match_id, int):
+                    raise ValueError("Ungültige Spiel-ID im Tipp-Entwurf.")
+                match = current_by_id.get(match_id)
+                if match is None:
+                    raise ValueError("Ein Tipp gehört nicht zum aktuellen Spieltag.")
+                kickoff = datetime.fromisoformat(match["matchDateTimeUTC"]).replace(tzinfo=timezone.utc)
+                if match.get("matchIsFinished") or kickoff <= now:
+                    raise ValueError("Ein bereits begonnenes Spiel kann nicht als Entwurf gespeichert werden.")
+                scores = {}
+                for side in ("home", "away"):
+                    value = item.get(side)
+                    if value in (None, ""):
+                        continue
+                    if isinstance(value, bool):
+                        raise ValueError("Ergebnisse müssen ganze Zahlen zwischen 0 und 20 sein.")
+                    try:
+                        score = int(value)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError("Ergebnisse müssen ganze Zahlen zwischen 0 und 20 sein.") from exc
+                    if str(score) != str(value) or not 0 <= score <= 20:
+                        raise ValueError("Ergebnisse müssen ganze Zahlen zwischen 0 und 20 sein.")
+                    scores[side] = score
+                if scores:
+                    predictions[str(match_id)] = scores
+            with self.server.database() as db:
+                season = season_for(datetime.now(BERLIN).date())
+                locked_ids = {
+                    str(row["match_id"]) for row in db.execute(
+                        "SELECT match_id FROM tips WHERE user_id = ? AND season = ?",
+                        (user["id"], season),
+                    )
+                }
+                predictions = {
+                    match_id: scores for match_id, scores in predictions.items()
+                    if match_id not in locked_ids
+                }
+                if predictions:
+                    db.execute(
+                        """INSERT INTO tip_drafts(user_id, season, matchday, predictions, updated_at)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(user_id, season, matchday) DO UPDATE SET
+                             predictions = excluded.predictions, updated_at = excluded.updated_at""",
+                        (user["id"], season, group["groupName"], json.dumps(predictions), now.isoformat()),
+                    )
+                else:
+                    db.execute(
+                        "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday = ?",
+                        (user["id"], season, group["groupName"]),
+                    )
+            self._json(HTTPStatus.OK, {"ok": True})
+        except (ValueError, KeyError, TypeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "Ungültiger Tipp-Entwurf."})
+        except (OSError, urllib.error.URLError, TimeoutError, *DATABASE_ERRORS) as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Tipp-Entwurf konnte nicht gespeichert werden: {exc}"})
 
 
 def main():

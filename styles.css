@@ -121,6 +121,7 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
 .crest-fallback { font: 700 11px "Space Grotesk", sans-serif; }
 .score-input { width: 42px; height: 35px; border: 1px solid #3e3e37; border-radius: 5px; outline: none; background: #131310; color: var(--white); text-align: center; font: 600 14px "Space Grotesk", sans-serif; }
 .score-input:focus { border-color: var(--yellow); box-shadow: 0 0 0 2px #f2c50020; }
+.score-input:disabled { border-color: #39392f; background: #24241f; color: #d4c66e; opacity: 1; }
 .score-separator { color: #77776f; text-align: center; font-size: 10px; }
 .submit-row { display: flex; justify-content: space-between; align-items: center; padding-top: 17px; }
 .submit-hint { color: #8e8d83; font-size: 9px; }.submit-hint strong { color: #c9c8c0; font-weight: 600; }

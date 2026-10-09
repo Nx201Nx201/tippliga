@@ -130,6 +130,12 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(saved["emailStatus"], "not_configured")
 
+        status, error = self.request("POST", "/api/tips", {
+            "tips": [{"matchId": 200, "home": 4, "away": 0}],
+        })
+        self.assertEqual(status, 409)
+        self.assertIn("nicht mehr geändert", error["error"])
+
         with self.server.database() as db:
             user_id = db.execute("SELECT id FROM users WHERE username = 'TestTipp'").fetchone()["id"]
             db.execute(
@@ -144,6 +150,28 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(state["leaderboard"][0]["points"], 3)
         self.assertEqual(state["tips"]["200"], {"home": 1, "away": 0})
+
+    def test_draft_is_restored_from_server_and_removed_after_submission(self):
+        self.assertEqual(self.register()[0], 201)
+        status, saved = self.request("POST", "/api/draft", {
+            "predictions": [{"matchId": 200, "home": 3, "away": None}],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(saved["ok"])
+
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["draft"], {"200": {"home": 3}})
+
+        status, _ = self.request("POST", "/api/tips", {
+            "tips": [{"matchId": 200, "home": 3, "away": 1}],
+        })
+        self.assertEqual(status, 200)
+
+        status, state = self.request("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["draft"], {})
+        self.assertEqual(state["tips"]["200"], {"home": 3, "away": 1})
 
     def test_tip_rejects_match_outside_current_round(self):
         self.assertEqual(self.register()[0], 201)

@@ -8,6 +8,111 @@ const authDialog = document.querySelector("#auth-dialog");
 const authForm = document.querySelector("#auth-form");
 const authError = document.querySelector("#auth-error");
 const submitStatus = document.querySelector("#submit-status");
+let draftSaveTimeout = null;
+let draftSyncPromise = Promise.resolve();
+
+function draftKey() {
+  const username = state?.me?.username.toLowerCase() || "guest";
+  return `tippliga-draft:${username}`;
+}
+
+function loadDraft() {
+  if (!state?.season || !state?.matchday) return {};
+  const predictions = Object.fromEntries(
+    Object.entries(state.draft || {}).map(([matchId, scores]) => [matchId, { ...scores }]),
+  );
+  try {
+    const key = draftKey();
+    const stored = localStorage.getItem(key);
+    if (!stored) return predictions;
+    const draft = JSON.parse(stored);
+    if (draft.season !== state.season || draft.matchday !== state.matchday) {
+      localStorage.removeItem(key);
+      return predictions;
+    }
+    for (const [matchId, scores] of Object.entries(draft.predictions || {})) {
+      predictions[matchId] = { ...predictions[matchId], ...scores };
+    }
+    return predictions;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      localStorage.removeItem(draftKey());
+      return predictions;
+    }
+    console.error("Could not load the local tip draft:", error);
+    submitStatus.textContent = "Entwürfe können in diesem Browser nicht gespeichert werden.";
+    return predictions;
+  }
+}
+
+function saveDraftInput(input) {
+  if (!state?.me || input.disabled) return;
+  const predictions = loadDraft();
+  const matchId = input.dataset.matchId;
+  predictions[matchId] ||= {};
+  if (input.value === "") {
+    delete predictions[matchId][input.dataset.side];
+    if (!Object.keys(predictions[matchId]).length) delete predictions[matchId];
+  } else {
+    predictions[matchId][input.dataset.side] = input.value;
+  }
+  state.draft = predictions;
+  try {
+    localStorage.setItem(draftKey(), JSON.stringify({
+      season: state.season,
+      matchday: state.matchday,
+      predictions,
+    }));
+  } catch (error) {
+    console.error("Could not save the local tip draft:", error);
+    submitStatus.textContent = "Entwurf konnte auf diesem Gerät nicht gespeichert werden.";
+  }
+}
+
+async function syncDraft() {
+  if (!state?.me) return;
+  const predictions = loadDraft();
+  const payload = Object.entries(predictions).map(([matchId, scores]) => ({
+    matchId: Number(matchId),
+    home: scores.home ?? null,
+    away: scores.away ?? null,
+  }));
+  const request = draftSyncPromise.then(() => api("/api/draft", { predictions: payload }));
+  draftSyncPromise = request.catch(() => {});
+  await request;
+}
+
+function scheduleDraftSync() {
+  window.clearTimeout(draftSaveTimeout);
+  draftSaveTimeout = window.setTimeout(() => {
+    syncDraft().catch((error) => {
+      console.error("Could not synchronize the tip draft:", error);
+      submitStatus.textContent = "Entwurf bleibt auf diesem Gerät, konnte aber nicht mit dem Server synchronisiert werden.";
+    });
+  }, 400);
+}
+
+function removeSubmittedDraft(tips) {
+  try {
+    const predictions = loadDraft();
+    for (const tip of tips) delete predictions[String(tip.matchId)];
+    const key = draftKey();
+    if (Object.keys(predictions).length) {
+      localStorage.setItem(key, JSON.stringify({
+        season: state.season,
+        matchday: state.matchday,
+        predictions,
+      }));
+    } else {
+      localStorage.removeItem(key);
+    }
+    state.draft = predictions;
+  } catch (error) {
+    console.error("Could not remove submitted tips from the local draft:", error);
+    return false;
+  }
+  return true;
+}
 
 async function api(path, body) {
   const response = await fetch(path, {
@@ -17,7 +122,11 @@ async function api(path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Die Anfrage ist fehlgeschlagen.");
+  if (!response.ok) {
+    const error = new Error(data.error || "Die Anfrage ist fehlgeschlagen.");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -117,14 +226,18 @@ function scoreBox(match, side, label) {
   input.setAttribute("aria-label", `${label} ${match.home} – ${match.away}`);
 
   const prediction = state?.tips?.[String(match.id)];
+  const draftPrediction = loadDraft()[String(match.id)];
   const started = Date.parse(match.date) <= Date.now();
   const result = match.result;
   if (prediction) {
     input.value = String(prediction[side]);
+  } else if (draftPrediction?.[side] !== undefined) {
+    input.value = String(draftPrediction[side]);
   } else if (result) {
     input.value = String(result[side]);
   }
-  input.disabled = !state?.me || started || match.finished;
+  input.disabled = Boolean(prediction) || !state?.me || started || match.finished;
+  if (prediction) input.title = "Abgegeben und gesperrt; dieser Tipp kann nicht mehr geändert werden.";
   return input;
 }
 
@@ -169,7 +282,7 @@ function renderAccount() {
   if (state?.me) {
     button.textContent = "Abmelden";
     welcome.textContent = `Hi, ${state.me.firstName}`;
-    note.textContent = "Tipps sind bis zum Anpfiff des jeweiligen Spiels möglich.";
+    note.textContent = "Entwürfe bleiben auf diesem Gerät. Abgeschickte Tipps sind gesperrt.";
   } else {
     button.textContent = "Anmelden";
     welcome.textContent = "";
@@ -209,6 +322,13 @@ function setTeamBadge(badge, name, shortName, logoUrl) {
   }, { once: true });
   badge.append(logo);
 }
+
+fixturesList.addEventListener("input", (event) => {
+  if (event.target.matches(".score-input")) {
+    saveDraftInput(event.target);
+    scheduleDraftSync();
+  }
+});
 
 function render() {
   renderAccount();
@@ -329,6 +449,12 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
     openAuth();
     return;
   }
+  window.clearTimeout(draftSaveTimeout);
+  try {
+    await syncDraft();
+  } catch (error) {
+    console.error("Could not synchronize the tip draft before submission:", error);
+  }
   const activeInputs = [...document.querySelectorAll(".score-input:not(:disabled)")];
   if (!activeInputs.length) {
     submitStatus.textContent = "Für diesen Spieltag sind keine offenen Tipps mehr möglich.";
@@ -350,6 +476,7 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
   }));
   try {
     const result = await api("/api/tips", { tips });
+    const draftRemoved = removeSubmittedDraft(tips);
     if (result.emailStatus === "sent") {
       submitStatus.textContent = "Tipps gespeichert und per E-Mail versendet.";
     } else if (result.emailStatus === "failed") {
@@ -357,8 +484,10 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
     } else {
       submitStatus.textContent = "Tipps auf dem Server gespeichert. E-Mail-Versand ist noch nicht eingerichtet.";
     }
+    if (!draftRemoved) submitStatus.textContent += " Der Entwurf auf diesem Gerät konnte nicht gelöscht werden.";
     await refresh();
   } catch (error) {
+    if (error.status === 409) await refresh();
     submitStatus.textContent = error.message;
   }
 });

@@ -1,0 +1,5 @@
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; img-src 'self' data: https://upload.wikimedia.org https://i.imgur.com https://assets.dfb.de https://www.bundesliga-reisefuehrer.de https://www.bundesliga.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'

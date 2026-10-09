@@ -15,16 +15,19 @@ Dann `http://127.0.0.1:8000` öffnen. Konten, Sitzungen und Tipps landen in `dat
 
 ## Öffentlich im Internet mit Render hosten
 
-Die App ist jetzt für Render vorbereitet (`render.yaml`). Für die Veröffentlichung:
+Die App ist für Render mit einem kostenlosen Web-Service und einer externen PostgreSQL-Datenbank vorbereitet (`render.yaml`). SQLite bleibt die lokale Standarddatenbank; sobald `DATABASE_URL` gesetzt ist, verwendet die App PostgreSQL.
 
-1. Den Inhalt dieses `Tippliga`-Ordners in ein eigenes GitHub-Repository hochladen. `data/` und lokale Datenbanken werden durch `.gitignore` ausgeschlossen.
-2. Bei Render **New + → Blueprint** wählen, das Repository verbinden und `render.yaml` bestätigen. Der Blueprint verwendet einen Web-Service mit dauerhaftem Speicher für SQLite. Der notwendige Service-/Speicher-Tarif ist nicht kostenlos; Render zeigt die aktuellen Kosten vor dem Erstellen an.
-3. Nach dem ersten Start in Render **Settings → Custom Domains** öffnen und deine Domain eintragen. Die von Render angezeigten DNS-Einträge beim Domain-Anbieter setzen. HTTPS wird von Render für die verbundene Domain bereitgestellt.
-4. Für E-Mail-Benachrichtigungen unter **Environment** die `SMTP_*` Variablen aus dem Abschnitt unten setzen und erneut deployen. Ohne diese Zugangsdaten werden Tipps gespeichert, aber keine E-Mail versendet.
+1. Bei [Neon](https://neon.tech/) ein kostenloses PostgreSQL-Projekt erstellen und dort die Verbindungszeichenfolge (Connection string) kopieren. Neons Free-Tarif ist laut aktueller Preisseite dauerhaft kostenlos und erfordert keine Kreditkarte; Limits und Tarifbedingungen können sich ändern.
+2. In Render **New + → Blueprint** wählen, das GitHub-Repository verbinden und `render.yaml` bestätigen. Beim Anlegen fragt Render nach `DATABASE_URL`; dort die kopierte Neon-Verbindungszeichenfolge einfügen. Nicht in GitHub oder in diese Datei eintragen.
+3. Der Blueprint verwendet den kostenlosen Render-Web-Service. Er schläft bei Inaktivität ein und kann beim ersten Aufruf danach etwa eine Minute zum Aufwachen brauchen. Die Konten und Tipps werden in Neon gespeichert, nicht im flüchtigen Dateisystem von Render.
+4. Nach erfolgreichem Start die von Render angezeigte `onrender.com`-Adresse öffnen. Eine eigene Domain kannst du später unter **Settings → Custom Domains** hinzufügen.
+5. Für E-Mail-Benachrichtigungen unter **Environment** die `SMTP_*` Variablen aus dem Abschnitt unten setzen und erneut deployen. Ohne diese Zugangsdaten werden Tipps gespeichert, aber keine E-Mail versendet.
 
-`COOKIE_SECURE=1`, der beschränkte Datei-Server und `/api/health` sind in der Render-Konfiguration enthalten. Ohne Render-Konto-, Repository- und Domainzugriff kann der Dienst nicht von hier aus veröffentlicht oder mit deiner Domain verbunden werden.
+`COOKIE_SECURE=1`, der beschränkte Datei-Server und `/api/health` sind in der Render-Konfiguration enthalten. Render Free und Neon Free haben Nutzungsgrenzen und keine Produktionsgarantie. Wenn Render trotzdem eine Kreditkarte verlangt, nicht fortfahren oder Zahlungsdaten eingeben; prüfe zuerst, dass im Blueprint der kostenlose Service ausgewählt ist. Eine Konto-Verifizierung durch Render lässt sich durch diese App-Änderung nicht umgehen.
 
-**Nicht einfach bei Vercel hochladen:** Die aktuelle App ist ein dauerhafter Python-Webserver mit SQLite-Datei. Vercels Serverless-Funktionen bieten dieser SQLite-Datei keinen persistenten Speicher. Für Vercel müsste der Server in Functions zerlegt und SQLite durch einen externen PostgreSQL-Dienst ersetzt werden. Für den vorhandenen Stand ist Render der direkte Weg.
+Die lokale SQLite-Datenbank wird nicht zu Neon kopiert. Der gehostete Dienst startet daher mit einer leeren Datenbank; vorhandene lokale Konten und Tipps werden nicht hochgeladen.
+
+**Nicht einfach bei Vercel hochladen:** Die aktuelle App ist ein dauerhafter Python-Webserver. Vercels Serverless-Funktionen passen nicht direkt zu diesem Server. Für den vorhandenen Stand ist Render mit Neon der vorbereitete Weg.
 
 Die Spieltagskarten zeigen vollständige Vereinsnamen und Vereinswappen der Bundesliga-Datenquelle. Die Bilddateien werden von den in der Content-Security-Policy freigegebenen Wappen-Hosts geladen.
 

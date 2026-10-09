@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from server import Handler, TippligaServer, score_prediction
+from server import DatabaseConnection, Handler, TippligaServer, score_prediction
 
 
 def fixture(match_id, group_id, group_name, kickoff, home, away, finished=False, result=None):
@@ -76,6 +76,21 @@ class TippligaServerTests(unittest.TestCase):
             "phone": "",
             "password": "sicheres-test-passwort",
         })
+
+    def test_postgres_adapter_translates_sqlite_placeholders(self):
+        class FakeConnection:
+            def execute(self, statement, parameters):
+                self.statement = statement
+                self.parameters = parameters
+
+        connection = FakeConnection()
+        database = DatabaseConnection(connection, postgres=True)
+        database.execute("SELECT * FROM tips WHERE user_id = ? AND season = ?", (7, 2026))
+        self.assertEqual(
+            connection.statement,
+            "SELECT * FROM tips WHERE user_id = %s AND season = %s",
+        )
+        self.assertEqual(connection.parameters, (7, 2026))
 
     def test_registration_requires_real_fields_and_persists_account(self):
         status, error = self.request("POST", "/api/register", {

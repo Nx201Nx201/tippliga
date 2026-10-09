@@ -25,6 +25,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlsplit
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
+
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "tippliga.sqlite3"
@@ -37,9 +44,8 @@ MAIL_TO = "nx201nx201@outlook.de"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,24}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS users (
+SCHEMA_SQLITE = (
+    """CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
     email TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -49,13 +55,13 @@ CREATE TABLE IF NOT EXISTS users (
     phone TEXT,
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
+);""",
+    """CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tips (
+);""",
+    """CREATE TABLE IF NOT EXISTS tips (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     season INTEGER NOT NULL,
     match_id INTEGER NOT NULL,
@@ -64,9 +70,48 @@ CREATE TABLE IF NOT EXISTS tips (
     away_goals INTEGER NOT NULL CHECK(away_goals BETWEEN 0 AND 20),
     updated_at TEXT NOT NULL,
     PRIMARY KEY(user_id, season, match_id)
-);
-CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);
-"""
+);""",
+    "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
+)
+
+SCHEMA_POSTGRES = (
+    """CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    address TEXT,
+    phone TEXT,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx
+       ON users (lower(username));""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx
+       ON users (lower(email));""",
+    """CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL
+);""",
+    """CREATE TABLE IF NOT EXISTS tips (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    season INTEGER NOT NULL,
+    match_id BIGINT NOT NULL,
+    matchday TEXT NOT NULL,
+    home_goals INTEGER NOT NULL CHECK(home_goals BETWEEN 0 AND 20),
+    away_goals INTEGER NOT NULL CHECK(away_goals BETWEEN 0 AND 20),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, season, match_id)
+);""",
+    "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
+)
+
+DATABASE_ERRORS = (sqlite3.Error,) + ((psycopg.Error,) if psycopg else ())
+DATABASE_INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + (
+    (psycopg.IntegrityError,) if psycopg else ()
+)
 
 
 def season_for(day: date) -> int:
@@ -222,25 +267,64 @@ class FixtureFeed:
         return matches
 
 
+class DatabaseConnection:
+    def __init__(self, connection, postgres: bool):
+        self.connection = connection
+        self.postgres = postgres
+
+    def execute(self, statement: str, parameters=()):
+        if self.postgres:
+            statement = statement.replace("?", "%s")
+        return self.connection.execute(statement, parameters)
+
+    def executemany(self, statement: str, parameters):
+        if self.postgres:
+            statement = statement.replace("?", "%s")
+        return self.connection.executemany(statement, parameters)
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
 class TippligaServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, address, handler, db_path=DEFAULT_DB, fixture_feed=None):
+        self.database_url = os.environ.get("DATABASE_URL")
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.database_url:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.fixture_feed = fixture_feed or FixtureFeed()
         self.login_attempts: dict[str, list[float]] = {}
         self.login_lock = threading.Lock()
         with self.database() as db:
-            db.executescript(SCHEMA)
+            schema = SCHEMA_POSTGRES if self.database_url else SCHEMA_SQLITE
+            for statement in schema:
+                db.execute(statement)
         super().__init__(address, handler)
 
     def connect(self):
+        if self.database_url:
+            if psycopg is None:
+                raise RuntimeError(
+                    "DATABASE_URL is set, but psycopg is not installed. "
+                    "Install the packages from requirements.txt."
+                )
+            return DatabaseConnection(
+                psycopg.connect(self.database_url, row_factory=dict_row),
+                postgres=True,
+            )
         db = sqlite3.connect(self.db_path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
-        return db
+        return DatabaseConnection(db, postgres=False)
 
     @contextmanager
     def database(self):
@@ -375,7 +459,7 @@ class Handler(SimpleHTTPRequestHandler):
             leaderboard = db.execute(
                 """SELECT u.id, u.username, COUNT(DISTINCT t.matchday) AS matchdays
                    FROM users u LEFT JOIN tips t ON t.user_id = u.id AND t.season = ?
-                   GROUP BY u.id ORDER BY u.username COLLATE NOCASE""",
+                   GROUP BY u.id ORDER BY lower(u.username)""",
                 (season_for(datetime.now(BERLIN).date()),),
             ).fetchall()
             tips = []
@@ -453,13 +537,13 @@ class Handler(SimpleHTTPRequestHandler):
                 with self.server.database() as db:
                     db.execute("SELECT 1")
                 self._json(HTTPStatus.OK, {"ok": True})
-            except sqlite3.Error:
+            except DATABASE_ERRORS:
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False})
             return
         if path == "/api/state":
             try:
                 self._json(HTTPStatus.OK, self._state())
-            except (OSError, urllib.error.URLError, TimeoutError, ValueError, KeyError, sqlite3.Error) as exc:
+            except (OSError, urllib.error.URLError, TimeoutError, ValueError, KeyError, *DATABASE_ERRORS) as exc:
                 self._json(HTTPStatus.BAD_GATEWAY, {
                     "error": f"Der aktuelle Bundesliga-Spielplan ist gerade nicht verfügbar: {exc}"
                 })
@@ -530,15 +614,17 @@ class Handler(SimpleHTTPRequestHandler):
                 cursor = db.execute(
                     """INSERT INTO users(username, email, first_name, last_name, address,
                                           phone, password_hash, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (username, email, first_name, last_name, address, phone,
-                     encoded_password, datetime.now(timezone.utc).isoformat()),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   RETURNING id""",
+                (username, email, first_name, last_name, address, phone,
+                 encoded_password, datetime.now(timezone.utc).isoformat()),
                 )
-            headers = self._set_session(cursor.lastrowid)
+                user_id = cursor.fetchone()["id"]
+            headers = self._set_session(user_id)
             self._json(HTTPStatus.CREATED, {"ok": True, "username": username}, headers)
-        except sqlite3.IntegrityError:
+        except DATABASE_INTEGRITY_ERRORS:
             self._json(HTTPStatus.CONFLICT, {"error": "Benutzername oder E-Mail-Adresse ist bereits registriert."})
-        except sqlite3.Error as exc:
+        except DATABASE_ERRORS as exc:
             self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Konto konnte nicht gespeichert werden: {exc}"})
 
     def _login(self, data: dict):
@@ -552,7 +638,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
         with self.server.database() as db:
             user = db.execute(
-                "SELECT id, username, password_hash FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE",
+                """SELECT id, username, password_hash FROM users
+                   WHERE lower(username) = lower(?) OR lower(email) = lower(?)""",
                 (identity, identity),
             ).fetchone()
         if not user or not password_matches(password, user["password_hash"]):
@@ -618,7 +705,7 @@ class Handler(SimpleHTTPRequestHandler):
             })
         except (ValueError, KeyError, TypeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "Ungültiger Tipp."})
-        except (OSError, urllib.error.URLError, TimeoutError, sqlite3.Error) as exc:
+        except (OSError, urllib.error.URLError, TimeoutError, *DATABASE_ERRORS) as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Tipps konnten nicht sicher gespeichert werden: {exc}"})
 
 
@@ -628,7 +715,10 @@ def main():
     db_path = Path(os.environ.get("TIPPLIGA_DB", str(DEFAULT_DB)))
     server = TippligaServer((host, port), Handler, db_path=db_path)
     print(f"Tippliga läuft auf http://{host}:{port}")
-    print(f"SQLite-Datenbank: {db_path.resolve()}")
+    if server.database_url:
+        print("Datenbank: PostgreSQL")
+    else:
+        print(f"SQLite-Datenbank: {db_path.resolve()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

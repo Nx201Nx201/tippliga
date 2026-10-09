@@ -106,7 +106,7 @@ function makeTeam(name, shortName, logoUrl, position) {
 
 function scoreBox(match, side, label) {
   const input = document.createElement("input");
-  input.className = "score-input";
+  input.className = `score-input score-${side}`;
   input.type = "number";
   input.min = "0";
   input.max = "20";

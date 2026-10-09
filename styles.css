@@ -53,7 +53,6 @@ a { color: inherit; text-decoration: none; }
 .score-orbit { position: absolute; border: 1px solid #ffffff0d; border-radius: 50%; }
 .orbit-one { width: 310px; height: 310px; }
 .orbit-two { width: 360px; height: 360px; border-style: dashed; border-color: #ffffff0a; }
-.hero-ball { position: absolute; top: 28px; right: 49px; font-size: 30px; filter: grayscale(1); opacity: .75; transform: rotate(-16deg); }
 .round-label { position: absolute; top: 54px; text-align: center; color: #96958a; font-size: 8px; line-height: 1.5; font-weight: 700; letter-spacing: 1.5px; }
 .round-number { margin-top: 12px; color: var(--yellow); font: 700 91px/.9 "Space Grotesk", sans-serif; letter-spacing: -7px; }
 .round-number span { color: var(--white); }
@@ -109,7 +108,7 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
 .lock-note { padding-bottom: 3px; color: #8e8d83; font-size: 10px; }
 .fixtures-list { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; border: 1px solid #ffffff0d; border-radius: 8px; background: var(--surface); }
 .fixture-error { margin: 0; padding: 18px 20px; color: #d3aa6d; font-size: 12px; line-height: 1.5; }
-.fixture { display: grid; grid-template-columns: 110px minmax(240px, 1fr) 48px 16px 48px minmax(240px, 1fr); gap: 13px; align-items: center; min-width: 900px; min-height: 72px; padding: 10px 20px; border-bottom: 1px solid #ffffff0b; }
+.fixture { display: grid; grid-template-columns: 110px minmax(240px, 1fr) 48px 16px 48px minmax(240px, 1fr); gap: 13px; align-items: center; min-width: 0; min-height: 72px; padding: 10px 20px; border-bottom: 1px solid #ffffff0b; }
 .fixture:last-child { border-bottom: 0; }
 .fixture-time { color: #89887e; font-size: 9px; line-height: 1.5; }
 .fixture-time strong { display: block; color: #d5d4cc; font-size: 10px; font-weight: 600; }
@@ -153,12 +152,12 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .hero h1 { font-size: clamp(43px, 9vw, 60px); letter-spacing: -3px; }
   .hero-score { width: 190px; height: 190px; margin-right: 2%; }
   .orbit-one { width: 226px; height: 226px; }.orbit-two { width: 262px; height: 262px; }
-  .round-number { font-size: 68px; }.round-label { top: 35px; font-size: 7px; }.hero-ball { top: 17px; right: 30px; font-size: 23px; }.hero-caption { bottom: 27px; font-size: 8px; }
+  .round-number { font-size: 68px; }.round-label { top: 35px; font-size: 7px; }.hero-caption { bottom: 27px; font-size: 8px; }
   .content-grid, .tips-section { width: 92%; }
   .content-grid { grid-template-columns: 1fr; padding-top: 37px; }
   .side-column { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
   .standings-panel { padding: 21px 16px 0; }
-  .fixture { min-width: 870px; grid-template-columns: 82px minmax(220px, 1fr) 42px 13px 42px minmax(220px, 1fr); gap: 7px; padding: 9px 11px; }
+  .fixture { grid-template-columns: 70px minmax(0, 1fr) 38px 12px 38px minmax(0, 1fr); gap: 5px; padding: 9px; }
   .fixture-time { font-size: 8px; }.fixture-time strong { font-size: 9px; }.fixture-team { gap: 8px; font-size: 12px; }.fixture-team-badge { width: 36px; height: 36px; font-size: 10px; }.club-crest { width: 29px; height: 29px; }
   .score-input { width: 38px; height: 33px; }
   .tips-section { padding-top: 50px; }
@@ -170,7 +169,7 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .hero-copy p { max-width: 245px; font-size: 11px; line-height: 1.6; }
   .hero-score { position: absolute; width: 105px; height: 105px; right: 19px; bottom: 47px; opacity: .9; }
   .orbit-one { width: 125px; height: 125px; }.orbit-two { width: 145px; height: 145px; }
-  .round-number { margin-top: 6px; font-size: 42px; letter-spacing: -4px; }.round-label { top: 17px; font-size: 5px; letter-spacing: 1px; }.hero-ball { top: 9px; right: 17px; font-size: 14px; }.hero-caption { bottom: 14px; font-size: 6px; }
+  .round-number { margin-top: 6px; font-size: 42px; letter-spacing: -4px; }.round-label { top: 17px; font-size: 5px; letter-spacing: 1px; }.hero-caption { bottom: 14px; font-size: 6px; }
   .hero-bottom { font-size: 7px; letter-spacing: .8px; }
   .content-grid, .tips-section { width: calc(100% - 30px); }
   .section-heading { gap: 8px; }.season-pill { padding: 7px 6px; font-size: 7px; }
@@ -178,8 +177,15 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .player-cell { gap: 5px; }.avatar { width: 22px; height: 22px; font-size: 8px; }.you-tag { padding: 3px; }
   .side-column { grid-template-columns: 1fr; grid-template-rows: auto auto; }.next-match-card { min-height: 150px; }.points-card { min-height: 135px; }
   .tips-heading { display: block; }.lock-note { display: block; margin-top: 9px; font-size: 9px; }
-  .fixture { min-width: 850px; grid-template-columns: 56px minmax(210px, 1fr) 33px 10px 33px minmax(210px, 1fr); gap: 4px; padding: 9px 6px; }
-  .fixture-time { font-size: 7px; }.fixture-time strong { font-size: 8px; }.fixture-team { gap: 7px; font-size: 11px; }.fixture-team-badge { width: 34px; height: 34px; border-radius: 5px; font-size: 9px; }.club-crest { width: 28px; height: 28px; }.score-input { width: 31px; height: 31px; font-size: 12px; }
-  .submit-row { align-items: flex-start; gap: 12px; }.submit-hint { max-width: 170px; line-height: 1.6; }.submit-row .button { flex: 0 0 auto; gap: 8px; padding: 0 10px; font-size: 10px; }
+  .fixture { grid-template-columns: minmax(0, 1fr) 34px 12px 34px minmax(0, 1fr); grid-template-areas: "time time time time time" "home hscore sep ascore away"; gap: 7px 3px; padding: 10px 8px; }
+  .fixture-time { grid-area: time; font-size: 8px; }.fixture-time strong { font-size: 9px; }
+  .fixture-home, .fixture-away { width: 100%; justify-self: stretch; text-align: center; }
+  .fixture-home { grid-area: home; }.fixture-away { grid-area: away; }
+  .fixture-team, .fixture-home .fixture-team { flex-direction: column; justify-content: center; gap: 4px; font-size: 10px; text-align: center; }
+  .fixture-team > span:last-child { max-width: 100%; font-size: 10px; line-height: 1.2; overflow-wrap: anywhere; }
+  .fixture-team-badge { width: 30px; height: 30px; border-radius: 5px; font-size: 9px; }.club-crest { width: 25px; height: 25px; }
+  .score-home { grid-area: hscore; }.score-away { grid-area: ascore; }.score-separator { grid-area: sep; }
+  .score-input { width: 34px; height: 34px; font-size: 12px; }
+  .submit-row { flex-direction: column; align-items: stretch; gap: 12px; }.submit-hint { max-width: none; line-height: 1.6; }.submit-row .button { align-self: flex-start; }
   .footer { min-height: 68px; padding: 0 15px; font-size: 7px; letter-spacing: .7px; }.footer-brand { font-size: 13px; }
 }

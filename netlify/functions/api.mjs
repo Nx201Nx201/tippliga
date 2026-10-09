@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS blocked_usernames (
   username TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS user_devices (
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_hash TEXT NOT NULL,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, device_hash)
+);
+CREATE TABLE IF NOT EXISTS blocked_devices (
+  device_hash TEXT PRIMARY KEY,
+  blocked_until TIMESTAMPTZ NOT NULL
+);
 CREATE TABLE IF NOT EXISTS login_attempts (
   id BIGSERIAL PRIMARY KEY,
   client_hash TEXT NOT NULL,
@@ -95,17 +105,20 @@ async function readyDatabase() {
 }
 
 function json(data, status = 200, extraHeaders = {}) {
+  const headers = new Headers({
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; img-src 'self' data: https://upload.wikimedia.org https://i.imgur.com https://assets.dfb.de https://www.bundesliga-reisefuehrer.de https://www.bundesliga.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+  });
+  for (const [key, value] of Object.entries(extraHeaders)) {
+    for (const item of Array.isArray(value) ? value : [value]) headers.append(key, item);
+  }
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
-      "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; img-src 'self' data: https://upload.wikimedia.org https://i.imgur.com https://assets.dfb.de https://www.bundesliga-reisefuehrer.de https://www.bundesliga.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
-      ...extraHeaders,
-    },
+    headers,
   });
 }
 
@@ -131,14 +144,46 @@ async function requestBody(request) {
 }
 
 function cookieToken(request) {
+  return cookieValue(request, "tippliga_session");
+}
+
+function cookieValue(request, name) {
   const cookie = request.headers.get("cookie") || "";
   for (const part of cookie.split(";")) {
     const separator = part.indexOf("=");
-    if (separator > 0 && part.slice(0, separator).trim() === "tippliga_session") {
+    if (separator > 0 && part.slice(0, separator).trim() === name) {
       return part.slice(separator + 1).trim();
     }
   }
   return null;
+}
+
+function deviceToken(request) {
+  const token = cookieValue(request, "tippliga_device");
+  return token && /^[A-Za-z0-9_-]{40,50}$/.test(token) ? token : null;
+}
+
+function newDeviceToken(request) {
+  return deviceToken(request) || randomBytes(32).toString("base64url");
+}
+
+async function deviceIsBlocked(token) {
+  if (!token) return false;
+  const db = await readyDatabase();
+  await db.query("DELETE FROM blocked_devices WHERE blocked_until <= NOW()");
+  const result = await db.query(
+    "SELECT 1 FROM blocked_devices WHERE device_hash = $1 AND blocked_until > NOW()",
+    [hash(token)],
+  );
+  return result.rowCount > 0;
+}
+
+function deviceCookie(token) {
+  return `tippliga_device=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=31536000`;
+}
+
+function sessionCookie(token) {
+  return `tippliga_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${sessionDays * 86400}`;
 }
 
 function hash(value) {
@@ -148,6 +193,8 @@ function hash(value) {
 async function currentUser(request) {
   const token = cookieToken(request);
   if (!token) return null;
+  const device = deviceToken(request);
+  if (device && await deviceIsBlocked(device)) return null;
   const db = await readyDatabase();
   const result = await db.query(
     `SELECT u.id, u.username, u.email, u.first_name, u.last_name, u.is_banned
@@ -159,16 +206,32 @@ async function currentUser(request) {
   return user ? { ...user, isAdmin: user.username.toLowerCase() === adminUsername } : null;
 }
 
-async function issueSession(userId) {
+async function issueSession(userId, device) {
   const token = randomBytes(32).toString("base64url");
   const db = await readyDatabase();
-  await db.query(
-    `INSERT INTO sessions (token_hash, user_id, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-    [hash(token), userId],
-  );
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO sessions (token_hash, user_id, expires_at)
+       VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
+      [hash(token), userId],
+    );
+    await client.query(
+      `INSERT INTO user_devices (user_id, device_hash, last_seen)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, device_hash) DO UPDATE SET last_seen = NOW()`,
+      [userId, hash(device)],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
   await db.query("DELETE FROM sessions WHERE expires_at <= NOW()");
-  return `tippliga_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${sessionDays * 86400}`;
+  return [sessionCookie(token), deviceCookie(device)];
 }
 
 async function clearSession(request) {
@@ -269,8 +332,33 @@ async function stateFor(request) {
   };
 }
 
-async function register(data) {
+async function stateResponse(request) {
+  const state = await stateFor(request);
+  const user = await currentUser(request);
+  if (!user) return json(state);
+  const device = newDeviceToken(request);
+  const db = await readyDatabase();
+  await db.query(
+    `INSERT INTO user_devices (user_id, device_hash, last_seen)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, device_hash) DO UPDATE SET last_seen = NOW()`,
+    [user.id, hash(device)],
+  );
+  return json(state, 200, deviceToken(request) ? {} : { "Set-Cookie": deviceCookie(device) });
+}
+
+async function register(data, request) {
   const fields = validateRegistration(data);
+  const device = newDeviceToken(request);
+  const db = await readyDatabase();
+  if (deviceToken(request) && await deviceIsBlocked(device)) {
+    return json({ error: "Dieses Gerät ist nach einer Kontosperre noch vorübergehend gesperrt." }, 403);
+  }
+  const blocked = await db.query(
+    "SELECT 1 FROM blocked_usernames WHERE username = lower($1)",
+    [fields.username],
+  );
+  if (blocked.rowCount) return json({ error: "Dieser Benutzername ist nicht erlaubt." }, 400);
   const passwordSalt = randomBytes(16);
   const passwordKey = await scrypt(fields.password, passwordSalt, 64, {
     N: 2 ** 14,
@@ -279,12 +367,6 @@ async function register(data) {
     maxmem: 64 * 1024 * 1024,
   });
   const encodedPassword = `scrypt$${passwordSalt.toString("hex")}$${Buffer.from(passwordKey).toString("hex")}`;
-  const db = await readyDatabase();
-  const blocked = await db.query(
-    "SELECT 1 FROM blocked_usernames WHERE username = lower($1)",
-    [fields.username],
-  );
-  if (blocked.rowCount) return json({ error: "Dieser Benutzername ist nicht erlaubt." }, 400);
   const client = await db.connect();
   let inTransaction = false;
   try {
@@ -301,10 +383,16 @@ async function register(data) {
        VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
       [hash(token), inserted.rows[0].id],
     );
+    await client.query(
+      `INSERT INTO user_devices (user_id, device_hash, last_seen)
+       VALUES ($1, $2, NOW())`,
+      [inserted.rows[0].id, hash(device)],
+    );
     await client.query("COMMIT");
     inTransaction = false;
-    const setCookie = `tippliga_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${sessionDays * 86400}`;
-    return json({ ok: true, username: fields.username }, 201, { "Set-Cookie": setCookie });
+    return json({ ok: true, username: fields.username }, 201, {
+      "Set-Cookie": [sessionCookie(token), deviceCookie(device)],
+    });
   } catch (error) {
     if (inTransaction) await client.query("ROLLBACK");
     if (error.code === "23505") {
@@ -346,6 +434,10 @@ async function allowLoginAttempt(request) {
 }
 
 async function login(data, request) {
+  const device = newDeviceToken(request);
+  if (deviceToken(request) && await deviceIsBlocked(device)) {
+    return json({ error: "Dieses Gerät ist nach einer Kontosperre noch vorübergehend gesperrt." }, 403);
+  }
   if (!await allowLoginAttempt(request)) {
     return json({ error: "Zu viele Anmeldeversuche. Bitte warte eine Minute." }, 429);
   }
@@ -367,8 +459,9 @@ async function login(data, request) {
   if (user.is_banned) {
     return json({ error: "Dieses Konto wurde von der Administration gesperrt." }, 403);
   }
-  const setCookie = await issueSession(user.id);
-  return json({ ok: true, username: user.username }, 200, { "Set-Cookie": setCookie });
+  return json({ ok: true, username: user.username }, 200, {
+    "Set-Cookie": await issueSession(user.id, device),
+  });
 }
 
 async function sendTipEmail(username, matchday, lines) {
@@ -555,7 +648,18 @@ async function saveDraft(data, request) {
 
 async function adminUser(request) {
   const user = await currentUser(request);
-  return user?.isAdmin ? user : null;
+  if (!user?.isAdmin) return null;
+  const device = deviceToken(request);
+  if (device) {
+    const db = await readyDatabase();
+    await db.query(
+      `INSERT INTO user_devices (user_id, device_hash, last_seen)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, device_hash) DO UPDATE SET last_seen = NOW()`,
+      [user.id, hash(device)],
+    );
+  }
+  return user;
 }
 
 async function adminData(request) {
@@ -598,6 +702,23 @@ async function setUserBan(data, request) {
       await client.query("ROLLBACK");
       return json({ error: "Das Administratorkonto kann nicht gesperrt werden." }, 400);
     }
+    if (data.banned) {
+      await client.query(
+        `INSERT INTO blocked_devices (device_hash, blocked_until)
+         SELECT d.device_hash, NOW() + INTERVAL '30 days'
+         FROM user_devices d
+         WHERE d.user_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM user_devices admin_devices
+             JOIN users admin ON admin.id = admin_devices.user_id
+             WHERE lower(admin.username) = $2
+               AND admin_devices.device_hash = d.device_hash
+           )
+         ON CONFLICT (device_hash) DO UPDATE SET
+           blocked_until = GREATEST(blocked_devices.blocked_until, EXCLUDED.blocked_until)`,
+        [data.userId, adminUsername],
+      );
+    }
     await client.query("UPDATE users SET is_banned = $1 WHERE id = $2", [data.banned, data.userId]);
     if (data.banned) await client.query("DELETE FROM sessions WHERE user_id = $1", [data.userId]);
     await client.query("COMMIT");
@@ -608,6 +729,27 @@ async function setUserBan(data, request) {
   } finally {
     client.release();
   }
+}
+
+async function deleteUser(data, request) {
+  if (!await adminUser(request)) {
+    return json({ error: "Nur die Administration darf diese Funktion verwenden." }, 403);
+  }
+  if (!Number.isSafeInteger(data.userId) || data.userId < 1) {
+    return json({ error: "Ungültiges Spielerkonto." }, 400);
+  }
+  const db = await readyDatabase();
+  const result = await db.query(
+    "DELETE FROM users WHERE id = $1 AND lower(username) <> $2 RETURNING id",
+    [data.userId, adminUsername],
+  );
+  if (!result.rowCount) {
+    const exists = await db.query("SELECT 1 FROM users WHERE id = $1", [data.userId]);
+    return exists.rowCount
+      ? json({ error: "Das Administratorkonto kann nicht gelöscht werden." }, 400)
+      : json({ error: "Spielerkonto nicht gefunden." }, 404);
+  }
+  return json({ ok: true });
 }
 
 async function setBlockedUsername(data, request) {
@@ -648,7 +790,7 @@ async function handle(request) {
   }
   if (request.method === "GET" && path === "/api/state") {
     try {
-      return json(await stateFor(request));
+      return await stateResponse(request);
     } catch (error) {
       console.error("State request failed:", error);
       return json({
@@ -682,7 +824,7 @@ async function handle(request) {
     }
     if (path === "/api/register") {
       try {
-        return await register(data);
+        return await register(data, request);
       } catch (error) {
         if (error instanceof RegistrationValidationError) {
           return json({ error: error.message }, 400);
@@ -729,6 +871,14 @@ async function handle(request) {
       } catch (error) {
         console.error("Updating player suspension failed:", error);
         return json({ error: "Spielersperre konnte nicht gespeichert werden." }, 500);
+      }
+    }
+    if (path === "/api/admin/user/delete") {
+      try {
+        return await deleteUser(data, request);
+      } catch (error) {
+        console.error("Deleting player account failed:", error);
+        return json({ error: "Spielerkonto konnte nicht gelöscht werden." }, 500);
       }
     }
     if (path === "/api/admin/username") {

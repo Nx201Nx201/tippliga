@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "tippliga.sqlite3"
 OPENLIGADB = "https://api.openligadb.de/getmatchdata/bl1"
 COOKIE_NAME = "tippliga_session"
+DEVICE_COOKIE_NAME = "tippliga_device"
 SESSION_DAYS = 30
 FIXTURE_CACHE_SECONDS = 600
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -84,6 +85,16 @@ SCHEMA_SQLITE = (
     username TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
 );""",
+    """CREATE TABLE IF NOT EXISTS user_devices (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_hash TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY(user_id, device_hash)
+);""",
+    """CREATE TABLE IF NOT EXISTS blocked_devices (
+    device_hash TEXT PRIMARY KEY,
+    blocked_until TEXT NOT NULL
+);""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
@@ -130,6 +141,16 @@ SCHEMA_POSTGRES = (
     """CREATE TABLE IF NOT EXISTS blocked_usernames (
     username TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
+);""",
+    """CREATE TABLE IF NOT EXISTS user_devices (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_hash TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY(user_id, device_hash)
+);""",
+    """CREATE TABLE IF NOT EXISTS blocked_devices (
+    device_hash TEXT PRIMARY KEY,
+    blocked_until TEXT NOT NULL
 );""",
     "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
@@ -409,7 +430,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         for key, value in (headers or {}).items():
-            self.send_header(key, value)
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    self.send_header(key, item)
+            else:
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -426,18 +451,51 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("Ungültige Anfrage.") from exc
 
     def _session_token(self):
+        return self._cookie_value(COOKIE_NAME)
+
+    def _cookie_value(self, name: str):
         cookie_header = self.headers.get("Cookie", "")
         cookie = http.cookies.SimpleCookie()
         try:
             cookie.load(cookie_header)
         except http.cookies.CookieError:
             return None
-        morsel = cookie.get(COOKIE_NAME)
+        morsel = cookie.get(name)
         return morsel.value if morsel else None
+
+    def _device_token(self):
+        token = self._cookie_value(DEVICE_COOKIE_NAME)
+        return token if token and re.fullmatch(r"[A-Za-z0-9_-]{40,50}", token) else None
+
+    def _new_device_token(self):
+        return self._device_token() or secrets.token_urlsafe(32)
+
+    def _device_is_blocked(self, token: str | None):
+        if not token:
+            return False
+        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self.server.database() as db:
+            db.execute(
+                "DELETE FROM blocked_devices WHERE blocked_until <= ?",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+            return db.execute(
+                "SELECT 1 FROM blocked_devices WHERE device_hash = ? AND blocked_until > ?",
+                (digest, datetime.now(timezone.utc).isoformat()),
+            ).fetchone() is not None
+
+    def _device_cookie(self, token: str):
+        cookie = f"{DEVICE_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"
+        if os.environ.get("COOKIE_SECURE", "").lower() in {"1", "true", "yes"}:
+            cookie += "; Secure"
+        return cookie
+
+    def _auth_cookies(self, session_cookie: str, device_token: str):
+        return {"Set-Cookie": [session_cookie, self._device_cookie(device_token)]}
 
     def _current_user(self):
         token = self._session_token()
-        if not token:
+        if not token or self._device_is_blocked(self._device_token()):
             return None
         digest = hashlib.sha256(token.encode("ascii")).hexdigest()
         with self.server.database() as db:
@@ -599,7 +657,24 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/api/state":
             try:
-                self._json(HTTPStatus.OK, self._state())
+                state = self._state()
+                user = self._current_user()
+                device_cookie = None
+                if user:
+                    device = self._new_device_token()
+                    with self.server.database() as db:
+                        db.execute(
+                            """INSERT INTO user_devices(user_id, device_hash, last_seen)
+                               VALUES (?, ?, ?)
+                               ON CONFLICT(user_id, device_hash) DO UPDATE SET
+                                 last_seen = excluded.last_seen""",
+                            (user["id"], hashlib.sha256(device.encode("ascii")).hexdigest(),
+                             datetime.now(timezone.utc).isoformat()),
+                        )
+                    if not self._device_token():
+                        device_cookie = self._device_cookie(device)
+                headers = {"Set-Cookie": device_cookie} if device_cookie else None
+                self._json(HTTPStatus.OK, state, headers)
             except (OSError, urllib.error.URLError, TimeoutError, ValueError, KeyError, *DATABASE_ERRORS) as exc:
                 self._json(HTTPStatus.BAD_GATEWAY, {
                     "error": f"Der aktuelle Bundesliga-Spielplan ist gerade nicht verfügbar: {exc}"
@@ -628,7 +703,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path in {
             "/api/register", "/api/login", "/api/logout", "/api/tips", "/api/draft",
-            "/api/admin/user", "/api/admin/username",
+            "/api/admin/user", "/api/admin/user/delete", "/api/admin/username",
         }:
             origin = self.headers.get("Origin")
             host = self.headers.get("Host")
@@ -648,6 +723,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._save_draft(data)
         elif path == "/api/admin/user":
             self._set_user_ban(data)
+        elif path == "/api/admin/user/delete":
+            self._delete_user(data)
         elif path == "/api/admin/username":
             self._set_blocked_username(data)
         else:
@@ -678,6 +755,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Adresse oder Telefonnummer ist zu lang."})
             return
         try:
+            device_token = self._new_device_token()
+            if self._device_is_blocked(device_token):
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Dieses Gerät ist nach einer Kontosperre noch vorübergehend gesperrt."})
+                return
             with self.server.database() as db:
                 blocked = db.execute(
                     "SELECT 1 FROM blocked_usernames WHERE username = ?",
@@ -697,7 +778,12 @@ class Handler(SimpleHTTPRequestHandler):
                  encoded_password, datetime.now(timezone.utc).isoformat()),
                 )
                 user_id = cursor.fetchone()["id"]
-            headers = self._set_session(user_id)
+                db.execute(
+                    "INSERT INTO user_devices(user_id, device_hash, last_seen) VALUES (?, ?, ?)",
+                    (user_id, hashlib.sha256(device_token.encode("ascii")).hexdigest(),
+                     datetime.now(timezone.utc).isoformat()),
+                )
+            headers = self._auth_cookies(self._set_session(user_id)["Set-Cookie"], device_token)
             self._json(HTTPStatus.CREATED, {"ok": True, "username": username}, headers)
         except DATABASE_INTEGRITY_ERRORS:
             self._json(HTTPStatus.CONFLICT, {"error": "Benutzername oder E-Mail-Adresse ist bereits registriert."})
@@ -707,6 +793,10 @@ class Handler(SimpleHTTPRequestHandler):
     def _login(self, data: dict):
         if not self._allow_login_attempt():
             self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Zu viele Anmeldeversuche. Bitte warte eine Minute."})
+            return
+        device_token = self._new_device_token()
+        if self._device_is_blocked(device_token):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "Dieses Gerät ist nach einer Kontosperre noch vorübergehend gesperrt."})
             return
         identity = str(data.get("identity", "")).strip()
         password = data.get("password", "")
@@ -725,12 +815,30 @@ class Handler(SimpleHTTPRequestHandler):
         if user["is_banned"]:
             self._json(HTTPStatus.FORBIDDEN, {"error": "Dieses Konto wurde von der Administration gesperrt."})
             return
+        with self.server.database() as db:
+            db.execute(
+                """INSERT INTO user_devices(user_id, device_hash, last_seen) VALUES (?, ?, ?)
+                   ON CONFLICT(user_id, device_hash) DO UPDATE SET last_seen = excluded.last_seen""",
+                (user["id"], hashlib.sha256(device_token.encode("ascii")).hexdigest(),
+                 datetime.now(timezone.utc).isoformat()),
+            )
         self._json(HTTPStatus.OK, {"ok": True, "username": user["username"]},
-                   self._set_session(user["id"]))
+                   self._auth_cookies(self._set_session(user["id"])["Set-Cookie"], device_token))
 
     def _admin_user(self):
         user = self._current_user()
-        return user if user and user["username"].casefold() == self.server.admin_username else None
+        if not user or user["username"].casefold() != self.server.admin_username:
+            return None
+        device = self._device_token()
+        if device:
+            with self.server.database() as db:
+                db.execute(
+                    """INSERT INTO user_devices(user_id, device_hash, last_seen) VALUES (?, ?, ?)
+                       ON CONFLICT(user_id, device_hash) DO UPDATE SET last_seen = excluded.last_seen""",
+                    (user["id"], hashlib.sha256(device.encode("ascii")).hexdigest(),
+                     datetime.now(timezone.utc).isoformat()),
+                )
+        return user
 
     def _admin_data(self):
         try:
@@ -776,6 +884,37 @@ class Handler(SimpleHTTPRequestHandler):
                 if target["username"].casefold() == self.server.admin_username and banned:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "Das Administratorkonto kann nicht gesperrt werden."})
                     return
+                if banned:
+                    device_hashes = {
+                        row["device_hash"] for row in db.execute(
+                            "SELECT device_hash FROM user_devices WHERE user_id = ?",
+                            (user_id,),
+                        )
+                    }
+                    admin_hashes = {
+                        row["device_hash"] for row in db.execute(
+                            """SELECT d.device_hash FROM user_devices d
+                               JOIN users u ON u.id = d.user_id
+                               WHERE lower(u.username) = lower(?)""",
+                            (self.server.admin_username,),
+                        )
+                    }
+                    now = datetime.now(timezone.utc)
+                    blocked_until = (now + timedelta(days=30)).isoformat()
+                    for device_hash in device_hashes - admin_hashes:
+                        current = db.execute(
+                            "SELECT blocked_until FROM blocked_devices WHERE device_hash = ?",
+                            (device_hash,),
+                        ).fetchone()
+                        if current:
+                            expires = datetime.fromisoformat(current["blocked_until"])
+                            if expires >= now + timedelta(days=30):
+                                continue
+                        db.execute(
+                            """INSERT INTO blocked_devices(device_hash, blocked_until) VALUES (?, ?)
+                               ON CONFLICT(device_hash) DO UPDATE SET blocked_until = excluded.blocked_until""",
+                            (device_hash, blocked_until),
+                        )
                 db.execute("UPDATE users SET is_banned = ? WHERE id = ?", (banned, user_id))
                 if banned:
                     db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -809,6 +948,31 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"ok": True})
         except DATABASE_ERRORS as exc:
             self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Benutzername konnte nicht gespeichert werden: {exc}"})
+
+    def _delete_user(self, data: dict):
+        user_id = data.get("userId")
+        if isinstance(user_id, bool) or not isinstance(user_id, int):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Ungültiges Spielerkonto."})
+            return
+        try:
+            if not self._admin_user():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "Nur die Administration darf diese Funktion verwenden."})
+                return
+            with self.server.database() as db:
+                target = db.execute(
+                    "SELECT username FROM users WHERE id = ?",
+                    (user_id,),
+                ).fetchone()
+                if not target:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Spielerkonto nicht gefunden."})
+                    return
+                if target["username"].casefold() == self.server.admin_username:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "Das Administratorkonto kann nicht gelöscht werden."})
+                    return
+                db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            self._json(HTTPStatus.OK, {"ok": True})
+        except DATABASE_ERRORS as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Spielerkonto konnte nicht gelöscht werden: {exc}"})
 
     def _save_tips(self, data: dict):
         user = self._current_user()

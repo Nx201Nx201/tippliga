@@ -385,7 +385,16 @@ async function refreshAdminPanel() {
       button.dataset.userId = String(user.id);
       button.dataset.banned = String(user.isBanned);
       button.textContent = user.isBanned ? "Entsperren" : "Sperren";
-      row.append(name, button);
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "button button-outline";
+      deleteButton.type = "button";
+      deleteButton.dataset.deleteUserId = String(user.id);
+      deleteButton.dataset.username = user.username;
+      deleteButton.textContent = "Löschen";
+      const actions = document.createElement("div");
+      actions.className = "admin-actions";
+      actions.append(button, deleteButton);
+      row.append(name, actions);
       return row;
     }));
     const blockedNames = document.querySelector("#blocked-username-list");
@@ -419,6 +428,23 @@ document.querySelector("#admin-users").addEventListener("click", async (event) =
     });
     await refresh();
     status.textContent = "Spielerkonto aktualisiert.";
+  } catch (error) {
+    status.textContent = error.message;
+  }
+});
+
+document.querySelector("#admin-users").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-delete-user-id]");
+  if (!button) return;
+  const username = button.dataset.username;
+  if (!window.confirm(`Konto „${username}“ wirklich endgültig löschen? Alle zugehörigen Tipps und Entwürfe werden ebenfalls gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.`)) {
+    return;
+  }
+  const status = document.querySelector("#admin-status");
+  try {
+    await api("/api/admin/user/delete", { userId: Number(button.dataset.deleteUserId) });
+    await refresh();
+    status.textContent = `Konto „${username}“ und seine Tipps wurden gelöscht.`;
   } catch (error) {
     status.textContent = error.message;
   }

@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
@@ -60,9 +61,21 @@ class TippligaServerTests(unittest.TestCase):
         response = connection.getresponse()
         raw = response.read()
         data = json.loads(raw) if response.getheader("Content-Type", "").startswith("application/json") else raw.decode()
-        cookie = response.getheader("Set-Cookie")
-        if cookie and "Max-Age=0" not in cookie:
-            self.cookie = cookie.split(";", 1)[0]
+        cookies = {}
+        for item in (self.cookie or "").split("; "):
+            if "=" in item:
+                name, value = item.split("=", 1)
+                cookies[name] = value
+        for name, value in response.getheaders():
+            if name.lower() != "set-cookie":
+                continue
+            cookie_pair = value.split(";", 1)[0]
+            cookie_name, cookie_value = cookie_pair.split("=", 1)
+            if "Max-Age=0" in value:
+                cookies.pop(cookie_name, None)
+            else:
+                cookies[cookie_name] = cookie_value
+        self.cookie = "; ".join(f"{name}={value}" for name, value in cookies.items()) or None
         connection.close()
         return response.status, data
 
@@ -200,6 +213,10 @@ class TippligaServerTests(unittest.TestCase):
             "blocked": True,
         })
         self.assertEqual(status, 400)
+        status, error = self.request("POST", "/api/admin/user/delete", {
+            "userId": admin_id,
+        })
+        self.assertEqual(status, 400)
 
         status, result = self.request("POST", "/api/admin/user", {
             "userId": player_id,
@@ -207,6 +224,24 @@ class TippligaServerTests(unittest.TestCase):
         })
         self.assertEqual(status, 200)
         self.assertTrue(result["ok"])
+        player_device = dict(
+            item.split("=", 1) for item in player_cookie.split("; ")
+        )["tippliga_device"]
+        with self.server.database() as db:
+            blocked = db.execute(
+                "SELECT blocked_until FROM blocked_devices WHERE device_hash = ?",
+                (hashlib.sha256(player_device.encode("ascii")).hexdigest(),),
+            ).fetchone()
+            admin_device = dict(
+                item.split("=", 1) for item in admin_cookie.split("; ")
+            )["tippliga_device"]
+            self.assertIsNone(db.execute(
+                "SELECT device_hash FROM blocked_devices WHERE device_hash = ?",
+                (hashlib.sha256(admin_device.encode("ascii")).hexdigest(),),
+            ).fetchone())
+        blocked_until = datetime.fromisoformat(blocked["blocked_until"])
+        self.assertGreater(blocked_until, datetime.now(timezone.utc) + timedelta(days=29))
+        self.assertLess(blocked_until, datetime.now(timezone.utc) + timedelta(days=31))
 
         self.cookie = player_cookie
         status, state = self.request("GET", "/api/state")
@@ -216,6 +251,20 @@ class TippligaServerTests(unittest.TestCase):
             "tips": [{"matchId": 200, "home": 1, "away": 0}],
         })
         self.assertEqual(status, 401)
+        status, error = self.request("POST", "/api/login", {
+            "identity": "adminowner",
+            "password": "sicheres-test-passwort",
+        })
+        self.assertEqual(status, 403)
+        self.assertIn("Gerät", error["error"])
+        status, error = self.request("POST", "/api/register", {
+            "username": "NeuesKonto",
+            "firstName": "Neu",
+            "lastName": "Konto",
+            "email": "neueskonto@example.de",
+            "password": "sicheres-test-passwort",
+        })
+        self.assertEqual(status, 403)
 
         self.cookie = admin_cookie
         status, result = self.request("POST", "/api/admin/username", {
@@ -244,11 +293,35 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(result["ok"])
 
+    def test_admin_can_delete_account_without_banning_and_remove_tips(self):
+        self.server.admin_username = "adminowner"
+        self.assertEqual(self.register("adminowner", "admin@example.de")[0], 201)
+        admin_cookie = self.cookie
+        self.cookie = None
+        self.assertEqual(self.register()[0], 201)
+        status, saved = self.request("POST", "/api/tips", {
+            "tips": [{"matchId": 200, "home": 2, "away": 1}],
+        })
+        self.assertEqual(status, 200)
+        with self.server.database() as db:
+            user_id = db.execute("SELECT id FROM users WHERE username = 'TestTipp'").fetchone()["id"]
+
+        self.cookie = admin_cookie
+        status, result = self.request("POST", "/api/admin/user/delete", {"userId": user_id})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        with self.server.database() as db:
+            self.assertIsNone(db.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone())
+            self.assertIsNone(db.execute("SELECT user_id FROM tips WHERE user_id = ?", (user_id,)).fetchone())
+            self.assertIsNone(db.execute("SELECT user_id FROM user_devices WHERE user_id = ?", (user_id,)).fetchone())
+
     def test_non_admin_cannot_access_moderation(self):
         self.assertEqual(self.register()[0], 201)
         status, error = self.request("GET", "/api/admin")
         self.assertEqual(status, 403)
         self.assertIn("Administration", error["error"])
+        status, error = self.request("POST", "/api/admin/user/delete", {"userId": 1})
+        self.assertEqual(status, 403)
 
     def test_tip_rejects_match_outside_current_round(self):
         self.assertEqual(self.register()[0], 201)

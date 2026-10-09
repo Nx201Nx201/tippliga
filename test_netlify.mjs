@@ -89,6 +89,12 @@ test("moderation endpoints reject unauthenticated requests", async () => {
     body: JSON.stringify({ userId: 1, banned: true }),
   }));
   assert.equal(writeResponse.status, 403);
+  const deleteResponse = await handler(new Request("https://example.net/api/admin/user/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: 1 }),
+  }));
+  assert.equal(deleteResponse.status, 403);
 });
 
 test("function validates registration before requiring a database", async () => {

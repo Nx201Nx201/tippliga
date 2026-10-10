@@ -245,7 +245,7 @@ async function clearSession(request) {
 
 async function fixturesFor(season) {
   const cached = fixtureCache.get(season);
-  if (cached && Date.now() - cached.timestamp < 60 * 1000) return cached.matches;
+  if (cached && Date.now() - cached.timestamp < 30 * 1000) return cached.matches;
   const response = await fetch(`https://api.openligadb.de/getmatchdata/bl1/${season}`, {
     headers: { "User-Agent": "Tippliga/1.0 (Bundesliga tip game)" },
     signal: AbortSignal.timeout(8_000),

@@ -694,4 +694,7 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
 
 if (cookieConsent === "unknown") openCookieSettings();
 refresh();
-window.setInterval(refresh, 5 * 60 * 1000);
+window.setInterval(refresh, 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refresh();
+});

@@ -27,10 +27,12 @@ test("Bundesliga season follows Berlin calendar date", () => {
   assert.equal(seasonFor(new Date("2026-02-01T12:00:00Z")), 2025);
 });
 
-test("scoring handles exact scores, tendencies, and draws", () => {
+test("scoring handles exact scores, partial scores, tendencies, and draws", () => {
   assert.equal(scorePrediction([2, 1], [2, 1]), 3);
+  assert.equal(scorePrediction([2, 0], [2, 2]), 1);
+  assert.equal(scorePrediction([1, 1], [2, 2]), 1);
   assert.equal(scorePrediction([4, 2], [1, 0]), 1);
-  assert.equal(scorePrediction([1, 1], [0, 0]), 1);
+  assert.equal(scorePrediction([0, 0], [0, 0]), 1);
   assert.equal(scorePrediction([0, 2], [2, 0]), 0);
 });
 

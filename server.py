@@ -202,7 +202,9 @@ def result_of(match: dict) -> tuple[int, int] | None:
 
 def score_prediction(predicted: tuple[int, int], actual: tuple[int, int]) -> int:
     if predicted == actual:
-        return 3
+        return 1 if actual[0] == actual[1] else 3
+    if predicted[0] == actual[0] or predicted[1] == actual[1]:
+        return 1
     if (
         (predicted[0] > predicted[1]) == (actual[0] > actual[1])
         and (predicted[0] < predicted[1]) == (actual[0] < actual[1])

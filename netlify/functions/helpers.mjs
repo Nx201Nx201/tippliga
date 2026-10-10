@@ -22,7 +22,10 @@ export function resultOf(match) {
 }
 
 export function scorePrediction(predicted, actual) {
-  if (predicted[0] === actual[0] && predicted[1] === actual[1]) return 3;
+  if (predicted[0] === actual[0] && predicted[1] === actual[1]) {
+    return actual[0] === actual[1] ? 1 : 3;
+  }
+  if (predicted[0] === actual[0] || predicted[1] === actual[1]) return 1;
   const predictedOutcome = Math.sign(predicted[0] - predicted[1]);
   const actualOutcome = Math.sign(actual[0] - actual[1]);
   return predictedOutcome === actualOutcome ? 1 : 0;

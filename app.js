@@ -318,7 +318,9 @@ function renderLeagueTable() {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 9;
-    cell.textContent = "Für diese Liga liegen derzeit noch keine Spielergebnisse vor.";
+    cell.textContent = state?.matches?.length
+      ? "Für diese Liga liegen bisher noch keine abgeschlossenen Spielergebnisse vor."
+      : `Für ${competition?.name || "diese Liga"} liefert die Datenquelle derzeit keinen Spielplan. Tabelle und Tipps erscheinen, sobald Spieldaten verfügbar sind.`;
     row.append(cell);
     body.replaceChildren(row);
     return;
@@ -404,7 +406,7 @@ function renderFixtures() {
     const message = document.createElement("p");
     message.className = "fixture-error";
     message.textContent = state?.competition
-      ? `Für ${state.competition.name} sind derzeit keine Spiele verfügbar.`
+      ? `Für ${state.competition.name} liefert die Datenquelle derzeit keinen Spielplan. Deshalb können hier noch keine Tipps abgegeben werden.`
       : "Für den aktuellen Spieltag sind derzeit keine Spiele verfügbar.";
     fixturesList.append(message);
     return;
@@ -537,10 +539,12 @@ function renderCompetitionButtons() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "competition-button";
-        button.textContent = competition.name;
+        button.textContent = competition.available
+          ? competition.name
+          : `${competition.name} · Spielplan fehlt`;
         button.setAttribute("aria-pressed", String(competition.code === selectedCompetitionCode));
         if (!competition.available) {
-          button.title = "Für diese Staffel sind aktuell keine Spieldaten vorhanden. Du kannst den Wettbewerb trotzdem auswählen.";
+          button.title = "Die Datenquelle liefert aktuell keine Spiele für diesen Wettbewerb. Du kannst ihn auswählen; Tippen und Tabelle sind erst mit Spieldaten möglich.";
         }
         button.addEventListener("click", () => {
           if (competition.code === selectedCompetitionCode) return;
@@ -890,16 +894,27 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
     submitStatus.textContent = "Für diesen Spieltag sind keine offenen Tipps mehr möglich.";
     return;
   }
-  if (activeInputs.some((input) => input.value === "" || !input.validity.valid)) {
-    submitStatus.textContent = "Bitte tippe jedes noch offene Spiel mit einem Ergebnis von 0 bis 20.";
+  const predictions = new Map();
+  const invalidMatchIds = new Set();
+  for (const input of activeInputs) {
+    const matchId = input.dataset.matchId;
+    if (!predictions.has(matchId)) predictions.set(matchId, {});
+    if (input.value !== "" && !input.validity.valid) invalidMatchIds.add(matchId);
+    if (input.value !== "" && input.validity.valid) {
+      predictions.get(matchId)[input.dataset.side] = Number(input.value);
+    }
+  }
+  if (invalidMatchIds.size) {
+    submitStatus.textContent = "Korrigiere bitte ungültige Ergebnisse. Erlaubt sind ganze Zahlen von 0 bis 20.";
     return;
   }
-  const predictions = new Map();
-  for (const input of activeInputs) {
-    if (!predictions.has(input.dataset.matchId)) predictions.set(input.dataset.matchId, {});
-    predictions.get(input.dataset.matchId)[input.dataset.side] = Number(input.value);
+  const completePredictions = [...predictions.entries()].filter(([, score]) =>
+    Number.isInteger(score.home) && Number.isInteger(score.away));
+  if (!completePredictions.length) {
+    submitStatus.textContent = "Gib mindestens für ein Spiel beide Ergebnisse ein. Andere Spiele kannst du leer lassen und später tippen.";
+    return;
   }
-  const tips = [...predictions.entries()].map(([matchId, score]) => ({
+  const tips = completePredictions.map(([matchId, score]) => ({
     matchId: Number(matchId),
     home: score.home,
     away: score.away,
@@ -916,13 +931,25 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
     const draftRemoved = removeSubmittedDraft(
       tips, storageKey, draftSeason, draftMatchday, competitionCode,
     );
+    const incompleteCount = [...predictions.values()].filter((score) =>
+      (score.home === undefined) !== (score.away === undefined)).length;
+    let message;
     if (result.emailStatus === "sent") {
-      submitStatus.textContent = "Tipps gespeichert und per E-Mail versendet.";
+      message = "Tipps gespeichert und per E-Mail versendet.";
     } else if (result.emailStatus === "failed") {
-      submitStatus.textContent = "Tipps gespeichert, aber der E-Mail-Versand ist fehlgeschlagen. Bitte Admin kontaktieren.";
+      message = "Tipps gespeichert, aber der E-Mail-Versand ist fehlgeschlagen. Bitte Admin kontaktieren.";
     } else {
-      submitStatus.textContent = "Tipps auf dem Server gespeichert. E-Mail-Versand ist noch nicht eingerichtet.";
+      message = "Tipps auf dem Server gespeichert. E-Mail-Versand ist noch nicht eingerichtet.";
     }
+    if (incompleteCount) {
+      const skippedMessage = incompleteCount === 1
+        ? "Ein teilweise ausgefülltes Spiel wurde übersprungen."
+        : `${incompleteCount} teilweise ausgefüllte Spiele wurden übersprungen.`;
+      message += ` ${skippedMessage} Ergänze sie und schicke sie später ab.`;
+    } else if (completePredictions.length < predictions.size) {
+      message += " Die übrigen Spiele kannst du später tippen.";
+    }
+    submitStatus.textContent = message;
     if (!draftRemoved) submitStatus.textContent += " Der Entwurf auf diesem Gerät konnte nicht gelöscht werden.";
     await refresh();
   } catch (error) {

@@ -1,4 +1,6 @@
 server.py
 test_server.py
+*.py
+__pycache__/
 requirements.txt
 render.yaml

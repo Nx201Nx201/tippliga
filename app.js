@@ -2,6 +2,11 @@ let state = null;
 let authMode = "login";
 const COOKIE_CONSENT_KEY = "tippliga-cookie-consent";
 const COMPETITION_KEY = "tippliga-competition";
+const OFFICIAL_FIXTURE_URLS = {
+  rlw: "https://www.fussball.de/spielplan.druck/-/datum-bis/2027-06-30/datum-von/2026-07-01/max/999/mode/PRINT/staffel/031253DN8G000005VS5489BTVT51B5B5-G",
+  rlsw: "https://www.regionalliga-suedwest.de/aktuelles/zeitgenaue-ansetzungen-spieltage-11-18",
+  "regio-bayern": "https://www.bfv.de/mspw/regionalliga-bayern/2026-27/regionalliga-bayern-der-13.-spieltag",
+};
 const FALLBACK_COMPETITIONS = [
   ["bl1", "1. Bundesliga", "Bundesliga (1.–3. Liga)", "league"],
   ["bl2", "2. Bundesliga", "Bundesliga (1.–3. Liga)", "league"],
@@ -11,6 +16,7 @@ const FALLBACK_COMPETITIONS = [
   ["rlw", "Regionalliga West", "4. Liga (Regionalligen)", "league"],
   ["rlsw", "Regionalliga Südwest", "4. Liga (Regionalligen)", "league"],
   ["regio-bayern", "Regionalliga Bayern", "4. Liga (Regionalligen)", "league"],
+  ["ucl", "UEFA Champions League", "Europapokal", "international"],
   ["DFBN", "DFB-Nationalspiele", "Länderspiele", "international"],
   ["FTS", "Freundschafts-/Testspiele", "Länderspiele", "international"],
   ["nla", "Nations League A", "Länderspiele", "international"],
@@ -296,6 +302,18 @@ function renderLeaderboard() {
   }
 }
 
+function officialFixtureLink(competitionCode) {
+  const url = OFFICIAL_FIXTURE_URLS[competitionCode];
+  if (!url) return null;
+  const link = document.createElement("a");
+  link.className = "fixture-source-link";
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Offiziellen Spielplan öffnen ↗";
+  return link;
+}
+
 function renderLeagueTable() {
   const panel = document.querySelector("#league-table-panel");
   const body = document.querySelector("#league-table-body");
@@ -321,6 +339,10 @@ function renderLeagueTable() {
     cell.textContent = state?.matches?.length
       ? "Für diese Liga liegen bisher noch keine abgeschlossenen Spielergebnisse vor."
       : `Für ${competition?.name || "diese Liga"} liefert die Datenquelle derzeit keinen Spielplan. Tabelle und Tipps erscheinen, sobald Spieldaten verfügbar sind.`;
+    if (!state?.matches?.length) {
+      const link = officialFixtureLink(competition?.code);
+      if (link) cell.append(document.createElement("br"), link);
+    }
     row.append(cell);
     body.replaceChildren(row);
     return;
@@ -406,9 +428,11 @@ function renderFixtures() {
     const message = document.createElement("p");
     message.className = "fixture-error";
     message.textContent = state?.competition
-      ? `Für ${state.competition.name} liefert die Datenquelle derzeit keinen Spielplan. Deshalb können hier noch keine Tipps abgegeben werden.`
+      ? `Für ${state.competition.name} ist derzeit kein Spielplan in der Tippliga verfügbar. Deshalb können hier noch keine Tipps abgegeben werden.`
       : "Für den aktuellen Spieltag sind derzeit keine Spiele verfügbar.";
     fixturesList.append(message);
+    const link = officialFixtureLink(state?.competition?.code);
+    if (link) fixturesList.append(link);
     return;
   }
   fixturesList.replaceChildren(...state.matches.map((match) => {

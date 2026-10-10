@@ -251,6 +251,8 @@ class TippligaServerTests(unittest.TestCase):
         by_code = {item["code"]: item for item in catalog["competitions"]}
         self.assertIn("bl3", by_code)
         self.assertEqual(by_code["bl3"]["category"], "Bundesliga (1.–3. Liga)")
+        self.assertEqual(by_code["ucl"]["name"], "UEFA Champions League")
+        self.assertEqual(by_code["ucl"]["category"], "Europapokal")
         self.assertTrue(by_code["rlw"]["available"] is False)
         self.assertTrue(by_code["rlsw"]["available"] is False)
         for code in ("rln", "rlno", "rlw", "rlsw", "regio-bayern"):

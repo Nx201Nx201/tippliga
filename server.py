@@ -46,6 +46,7 @@ COMPETITIONS = (
     {"code": "rlw", "name": "Regionalliga West", "category": "4. Liga (Regionalligen)", "kind": "league"},
     {"code": "rlsw", "name": "Regionalliga Südwest", "category": "4. Liga (Regionalligen)", "kind": "league"},
     {"code": "regio-bayern", "name": "Regionalliga Bayern", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "ucl", "name": "UEFA Champions League", "category": "Europapokal", "kind": "international"},
     {"code": "DFBN", "name": "DFB-Nationalspiele", "category": "Länderspiele", "kind": "international"},
     {"code": "FTS", "name": "Freundschafts-/Testspiele", "category": "Länderspiele", "kind": "international"},
     {"code": "nla", "name": "Nations League A", "category": "Länderspiele", "kind": "international"},

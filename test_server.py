@@ -347,12 +347,14 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("aktuellen Spieltag", error["error"])
 
-    def test_scoring_exact_partial_tendency_and_wrong_outcome(self):
+    def test_scoring_bundesliga_points_for_correct_outcome_and_partial_score(self):
         self.assertEqual(score_prediction((2, 1), (2, 1)), 3)
-        self.assertEqual(score_prediction((2, 0), (2, 2)), 1)
+        self.assertEqual(score_prediction((1, 2), (0, 2)), 3)
+        self.assertEqual(score_prediction((4, 2), (1, 0)), 3)
         self.assertEqual(score_prediction((1, 1), (2, 2)), 1)
-        self.assertEqual(score_prediction((4, 2), (1, 0)), 1)
+        self.assertEqual(score_prediction((2, 0), (2, 2)), 1)
         self.assertEqual(score_prediction((0, 0), (0, 0)), 1)
+        self.assertEqual(score_prediction((0, 3), (2, 2)), 0)
         self.assertEqual(score_prediction((0, 2), (2, 0)), 0)
 
     def test_health_and_sensitive_server_files(self):

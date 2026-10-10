@@ -39,7 +39,7 @@ OPENLIGADB = "https://api.openligadb.de/getmatchdata/bl1"
 COOKIE_NAME = "tippliga_session"
 DEVICE_COOKIE_NAME = "tippliga_device"
 SESSION_DAYS = 30
-FIXTURE_CACHE_SECONDS = 600
+FIXTURE_CACHE_SECONDS = 60
 BERLIN = ZoneInfo("Europe/Berlin")
 MAIL_TO = "nx201nx201@outlook.de"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,24}$")
@@ -203,14 +203,11 @@ def result_of(match: dict) -> tuple[int, int] | None:
 def score_prediction(predicted: tuple[int, int], actual: tuple[int, int]) -> int:
     if predicted == actual:
         return 1 if actual[0] == actual[1] else 3
-    if predicted[0] == actual[0] or predicted[1] == actual[1]:
-        return 1
-    if (
-        (predicted[0] > predicted[1]) == (actual[0] > actual[1])
-        and (predicted[0] < predicted[1]) == (actual[0] < actual[1])
-    ):
-        return 1
-    return 0
+    predicted_outcome = (predicted[0] > predicted[1]) - (predicted[0] < predicted[1])
+    actual_outcome = (actual[0] > actual[1]) - (actual[0] < actual[1])
+    if predicted_outcome == actual_outcome:
+        return 1 if actual_outcome == 0 else 3
+    return 1 if predicted[0] == actual[0] or predicted[1] == actual[1] else 0
 
 
 def current_matchday(matches: list[dict], now: datetime | None = None) -> tuple[dict, list[dict]]:

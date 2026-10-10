@@ -25,10 +25,10 @@ export function scorePrediction(predicted, actual) {
   if (predicted[0] === actual[0] && predicted[1] === actual[1]) {
     return actual[0] === actual[1] ? 1 : 3;
   }
-  if (predicted[0] === actual[0] || predicted[1] === actual[1]) return 1;
   const predictedOutcome = Math.sign(predicted[0] - predicted[1]);
   const actualOutcome = Math.sign(actual[0] - actual[1]);
-  return predictedOutcome === actualOutcome ? 1 : 0;
+  if (predictedOutcome === actualOutcome) return actualOutcome === 0 ? 1 : 3;
+  return predicted[0] === actual[0] || predicted[1] === actual[1] ? 1 : 0;
 }
 
 export function currentMatchday(matches, now = new Date()) {

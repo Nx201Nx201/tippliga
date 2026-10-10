@@ -1,13 +1,14 @@
 import http.client
 import hashlib
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from server import DatabaseConnection, Handler, TippligaServer, score_prediction
+from server import DatabaseConnection, Handler, TippligaServer, league_standings, score_prediction
 
 
 def fixture(match_id, group_id, group_name, kickoff, home, away, finished=False, result=None):
@@ -15,8 +16,8 @@ def fixture(match_id, group_id, group_name, kickoff, home, away, finished=False,
         "matchID": match_id,
         "matchDateTimeUTC": kickoff.isoformat(),
         "group": {"groupID": group_id, "groupName": group_name, "groupOrderID": group_id},
-        "team1": {"teamName": home, "shortName": home, "teamIconUrl": "https://upload.wikimedia.org/home.png"},
-        "team2": {"teamName": away, "shortName": away, "teamIconUrl": "https://upload.wikimedia.org/away.png"},
+        "team1": {"teamId": match_id * 2, "teamName": home, "shortName": home, "teamIconUrl": "https://upload.wikimedia.org/home.png"},
+        "team2": {"teamId": match_id * 2 + 1, "teamName": away, "shortName": away, "teamIconUrl": "https://upload.wikimedia.org/away.png"},
         "matchIsFinished": finished,
         "matchResults": ([{
             "resultTypeID": 2,
@@ -37,7 +38,12 @@ class TippligaServerTests(unittest.TestCase):
             fixture(200, 2, "2. Spieltag", now + timedelta(days=2),
                     "Heim Neu", "Auswärts Neu"),
         ]
-        feed = type("TestFeed", (), {"get": lambda _self, _season: matches})()
+        def get_fixtures(_self, _season, competition="bl1"):
+            if competition in {"rlw", "rlsw", "regio-bayern"}:
+                return []
+            return matches
+
+        feed = type("TestFeed", (), {"get": get_fixtures})()
         db_path = Path(self.temp_dir.name) / "test.sqlite3"
         self.server = TippligaServer(("127.0.0.1", 0), Handler, db_path, feed)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -106,6 +112,25 @@ class TippligaServerTests(unittest.TestCase):
             "SELECT * FROM tips WHERE user_id = %s AND season = %s",
         )
         self.assertEqual(connection.parameters, (7, 2026))
+
+    def test_league_standings_are_calculated_from_finished_matches(self):
+        first = fixture(
+            1, 1, "1. Spieltag", datetime.now(timezone.utc) - timedelta(days=2),
+            "Team Eins", "Team Zwei", finished=True, result=(2, 0),
+        )
+        second = fixture(
+            2, 2, "2. Spieltag", datetime.now(timezone.utc) - timedelta(days=1),
+            "Team Drei", "Team Eins", finished=True, result=(1, 1),
+        )
+        first["team1"]["teamId"] = 1
+        first["team2"]["teamId"] = 2
+        second["team1"]["teamId"] = 3
+        second["team2"]["teamId"] = 1
+        standings = league_standings([first, second])
+        self.assertEqual(standings[0]["name"], "Team Eins")
+        self.assertEqual(standings[0]["played"], 2)
+        self.assertEqual(standings[0]["points"], 4)
+        self.assertEqual(standings[0]["goalDifference"], 2)
 
     def test_authentication_requires_cookie_consent(self):
         status, error = self.request("POST", "/api/register", {
@@ -201,6 +226,93 @@ class TippligaServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(state["draft"], {})
         self.assertEqual(state["tips"]["200"], {"home": 3, "away": 1})
+
+    def test_competitions_keep_tips_and_leaderboards_separate(self):
+        self.assertEqual(self.register()[0], 201)
+        for competition_code, score in (("bl1", (1, 0)), ("bl2", (0, 1))):
+            status, result = self.request("POST", "/api/tips", {
+                "competitionCode": competition_code,
+                "tips": [{"matchId": 200, "home": score[0], "away": score[1]}],
+            })
+            self.assertEqual(status, 200, result)
+            status, state = self.request(
+                "GET", f"/api/state?competition={competition_code}"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(state["competition"]["code"], competition_code)
+            self.assertEqual(state["tips"]["200"], {
+                "home": score[0], "away": score[1],
+            })
+
+        status, catalog = self.request("GET", "/api/competitions")
+        self.assertEqual(status, 200)
+        self.assertIn("bl1", [item["code"] for item in catalog["competitions"]])
+        self.assertIn("bl2", [item["code"] for item in catalog["competitions"]])
+        by_code = {item["code"]: item for item in catalog["competitions"]}
+        self.assertIn("bl3", by_code)
+        self.assertEqual(by_code["bl3"]["category"], "Bundesliga (1.–3. Liga)")
+        self.assertTrue(by_code["rlw"]["available"] is False)
+        self.assertTrue(by_code["rlsw"]["available"] is False)
+        for code in ("rln", "rlno", "rlw", "rlsw", "regio-bayern"):
+            self.assertIn(code, by_code)
+
+        status, unavailable_state = self.request("GET", "/api/state?competition=rlw")
+        self.assertEqual(status, 200)
+        self.assertEqual(unavailable_state["competition"]["code"], "rlw")
+        self.assertEqual(unavailable_state["matches"], [])
+        self.assertEqual(unavailable_state["standings"], [])
+        self.assertEqual(unavailable_state["matchday"], "Noch keine Spiele verfügbar")
+
+    def test_legacy_sqlite_tips_and_drafts_migrate_to_bl1(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY, username TEXT NOT NULL, email TEXT NOT NULL,
+                first_name TEXT NOT NULL, last_name TEXT NOT NULL, address TEXT, phone TEXT,
+                password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            INSERT INTO users VALUES (1, 'Legacy', 'legacy@example.de', 'Alt', 'Konto',
+                NULL, NULL, 'hash', '2026-01-01T00:00:00+00:00');
+            CREATE TABLE tips (
+                user_id INTEGER NOT NULL, season INTEGER NOT NULL, match_id INTEGER NOT NULL,
+                matchday TEXT NOT NULL, home_goals INTEGER NOT NULL, away_goals INTEGER NOT NULL,
+                updated_at TEXT NOT NULL, PRIMARY KEY(user_id, season, match_id)
+            );
+            INSERT INTO tips VALUES (1, 2026, 200, '2. Spieltag', 2, 1, '2026-01-01');
+            CREATE TABLE tip_drafts (
+                user_id INTEGER NOT NULL, season INTEGER NOT NULL, matchday TEXT NOT NULL,
+                predictions TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, season, matchday)
+            );
+            INSERT INTO tip_drafts VALUES
+                (1, 2026, '2. Spieltag', '{"200":{"home":3}}', '2026-01-01');
+        """)
+        connection.commit()
+        connection.close()
+
+        migrated_server = TippligaServer(
+            ("127.0.0.1", 0), Handler, legacy_path, self.server.fixture_feed
+        )
+        try:
+            with migrated_server.database() as db:
+                legacy_tip = db.execute(
+                    """SELECT competition_code FROM tips
+                       WHERE user_id = 1 AND season = 2026 AND match_id = 200"""
+                ).fetchone()
+                self.assertEqual(legacy_tip["competition_code"], "bl1")
+                db.execute(
+                    """INSERT INTO tips(user_id, season, competition_code, match_id, matchday,
+                                        home_goals, away_goals, updated_at)
+                       VALUES (1, 2026, 'bl2', 200, '2. Spieltag', 1, 0, '2026-01-02')"""
+                )
+                migrated_draft = db.execute(
+                    """SELECT predictions FROM competition_tip_drafts
+                       WHERE user_id = 1 AND season = 2026 AND competition_code = 'bl1'"""
+                ).fetchone()
+                self.assertEqual(json.loads(migrated_draft["predictions"]), {"200": {"home": 3}})
+        finally:
+            migrated_server.server_close()
 
     def test_admin_can_suspend_players_and_block_registration_names(self):
         self.server.admin_username = "adminowner"

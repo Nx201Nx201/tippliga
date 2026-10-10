@@ -8,15 +8,15 @@ import {
   seasonFor,
   validateRegistration,
 } from "./netlify/functions/helpers.mjs";
-import handler from "./netlify/functions/api.mjs";
+import handler, { leagueStandings } from "./netlify/functions/api.mjs";
 
 function fixture(matchID, groupID, groupName, kickoff, finished = false) {
   return {
     matchID,
     matchDateTimeUTC: kickoff.toISOString(),
     group: { groupID, groupName, groupOrderID: groupID },
-    team1: { teamName: "Heim", shortName: "Heim", teamIconUrl: "" },
-    team2: { teamName: "Auswärts", shortName: "Auswärts", teamIconUrl: "" },
+    team1: { teamId: matchID * 2, teamName: "Heim", shortName: "Heim", teamIconUrl: "" },
+    team2: { teamId: matchID * 2 + 1, teamName: "Auswärts", shortName: "Auswärts", teamIconUrl: "" },
     matchIsFinished: finished,
     matchResults: [],
   };
@@ -45,6 +45,25 @@ test("finished results prefer the final result entry", () => {
     { resultTypeID: 2, resultOrderID: 2, pointsTeam1: 2, pointsTeam2: 1 },
   ];
   assert.deepEqual(resultOf(match), [2, 1]);
+});
+
+test("league table awards 3-1-0 points using only finished match results", () => {
+  const homeWin = fixture(1, 1, "1. Spieltag", new Date(), true);
+  homeWin.matchResults = [
+    { resultTypeID: 2, resultOrderID: 2, pointsTeam1: 2, pointsTeam2: 0 },
+  ];
+  const draw = fixture(2, 2, "2. Spieltag", new Date(), true);
+  draw.team1.teamId = 3;
+  draw.team1.teamName = "Dritter";
+  draw.team2.teamId = homeWin.team1.teamId;
+  draw.matchResults = [
+    { resultTypeID: 2, resultOrderID: 2, pointsTeam1: 1, pointsTeam2: 1 },
+  ];
+  const table = leagueStandings([homeWin, draw]);
+  assert.equal(table[0].name, "Heim");
+  assert.equal(table[0].played, 2);
+  assert.equal(table[0].points, 4);
+  assert.equal(table[0].goalDifference, 2);
 });
 
 test("public match includes German local date and the expected client fields", () => {
@@ -82,6 +101,16 @@ test("function returns JSON for unknown API routes", async () => {
   const response = await handler(new Request("https://example.net/api/unknown"));
   assert.equal(response.status, 404);
   assert.deepEqual(await response.json(), { error: "API-Endpunkt nicht gefunden." });
+});
+
+test("state endpoint rejects unsupported competition codes", async () => {
+  const response = await handler(new Request(
+    "https://example.net/api/state?competition=not-a-competition",
+  ));
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: "Dieser Wettbewerb wird nicht unterstützt.",
+  });
 });
 
 test("moderation endpoints reject unauthenticated requests", async () => {

@@ -17,13 +17,14 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 try:
     import psycopg
@@ -35,7 +36,21 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "tippliga.sqlite3"
-OPENLIGADB = "https://api.openligadb.de/getmatchdata/bl1"
+OPENLIGADB = "https://api.openligadb.de/getmatchdata"
+COMPETITIONS = (
+    {"code": "bl1", "name": "1. Bundesliga", "category": "Bundesliga (1.–3. Liga)", "kind": "league"},
+    {"code": "bl2", "name": "2. Bundesliga", "category": "Bundesliga (1.–3. Liga)", "kind": "league"},
+    {"code": "bl3", "name": "3. Liga", "category": "Bundesliga (1.–3. Liga)", "kind": "league"},
+    {"code": "rln", "name": "Regionalliga Nord", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "rlno", "name": "Regionalliga Nordost", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "rlw", "name": "Regionalliga West", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "rlsw", "name": "Regionalliga Südwest", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "regio-bayern", "name": "Regionalliga Bayern", "category": "4. Liga (Regionalligen)", "kind": "league"},
+    {"code": "DFBN", "name": "DFB-Nationalspiele", "category": "Länderspiele", "kind": "international"},
+    {"code": "FTS", "name": "Freundschafts-/Testspiele", "category": "Länderspiele", "kind": "international"},
+    {"code": "nla", "name": "Nations League A", "category": "Länderspiele", "kind": "international"},
+    {"code": "wm26", "name": "Weltmeisterschaft 2026", "category": "Länderspiele", "kind": "international"},
+)
 COOKIE_NAME = "tippliga_session"
 DEVICE_COOKIE_NAME = "tippliga_device"
 SESSION_DAYS = 30
@@ -66,12 +81,13 @@ SCHEMA_SQLITE = (
     """CREATE TABLE IF NOT EXISTS tips (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     season INTEGER NOT NULL,
-    match_id INTEGER NOT NULL,
+        competition_code TEXT NOT NULL DEFAULT 'bl1',
+        match_id INTEGER NOT NULL,
     matchday TEXT NOT NULL,
     home_goals INTEGER NOT NULL CHECK(home_goals BETWEEN 0 AND 20),
     away_goals INTEGER NOT NULL CHECK(away_goals BETWEEN 0 AND 20),
     updated_at TEXT NOT NULL,
-    PRIMARY KEY(user_id, season, match_id)
+    PRIMARY KEY(user_id, season, competition_code, match_id)
 );""",
     """CREATE TABLE IF NOT EXISTS tip_drafts (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -80,6 +96,15 @@ SCHEMA_SQLITE = (
     predictions TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(user_id, season, matchday)
+);""",
+    """CREATE TABLE IF NOT EXISTS competition_tip_drafts (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    season INTEGER NOT NULL,
+    competition_code TEXT NOT NULL,
+    matchday TEXT NOT NULL,
+    predictions TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, season, competition_code, matchday)
 );""",
     """CREATE TABLE IF NOT EXISTS blocked_usernames (
     username TEXT PRIMARY KEY,
@@ -95,7 +120,6 @@ SCHEMA_SQLITE = (
     device_hash TEXT PRIMARY KEY,
     blocked_until TEXT NOT NULL
 );""",
-    "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
 SCHEMA_POSTGRES = (
@@ -123,12 +147,13 @@ SCHEMA_POSTGRES = (
     """CREATE TABLE IF NOT EXISTS tips (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     season INTEGER NOT NULL,
-    match_id BIGINT NOT NULL,
+        competition_code TEXT NOT NULL DEFAULT 'bl1',
+        match_id BIGINT NOT NULL,
     matchday TEXT NOT NULL,
     home_goals INTEGER NOT NULL CHECK(home_goals BETWEEN 0 AND 20),
     away_goals INTEGER NOT NULL CHECK(away_goals BETWEEN 0 AND 20),
     updated_at TEXT NOT NULL,
-    PRIMARY KEY(user_id, season, match_id)
+    PRIMARY KEY(user_id, season, competition_code, match_id)
 );""",
     """CREATE TABLE IF NOT EXISTS tip_drafts (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -137,6 +162,15 @@ SCHEMA_POSTGRES = (
     predictions JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY(user_id, season, matchday)
+);""",
+    """CREATE TABLE IF NOT EXISTS competition_tip_drafts (
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    season INTEGER NOT NULL,
+    competition_code TEXT NOT NULL,
+    matchday TEXT NOT NULL,
+    predictions JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(user_id, season, competition_code, matchday)
 );""",
     """CREATE TABLE IF NOT EXISTS blocked_usernames (
     username TEXT PRIMARY KEY,
@@ -152,7 +186,6 @@ SCHEMA_POSTGRES = (
     device_hash TEXT PRIMARY KEY,
     blocked_until TEXT NOT NULL
 );""",
-    "CREATE INDEX IF NOT EXISTS tips_season_idx ON tips(season, match_id);",
 )
 
 DATABASE_ERRORS = (sqlite3.Error,) + ((psycopg.Error,) if psycopg else ())
@@ -208,6 +241,62 @@ def score_prediction(predicted: tuple[int, int], actual: tuple[int, int]) -> int
     if predicted_outcome == actual_outcome:
         return 1 if actual_outcome == 0 else 3
     return 1 if predicted[0] == actual[0] or predicted[1] == actual[1] else 0
+
+
+def league_standings(matches: list[dict]) -> list[dict]:
+    teams: dict[int, dict] = {}
+    for match in matches:
+        for team in (match["team1"], match["team2"]):
+            teams.setdefault(team["teamId"], {
+                "teamId": team["teamId"],
+                "name": team["teamName"],
+                "shortName": team.get("shortName", team["teamName"]),
+                "logo": team.get("teamIconUrl", ""),
+                "played": 0,
+                "wins": 0,
+                "draws": 0,
+                "losses": 0,
+                "goalsFor": 0,
+                "goalsAgainst": 0,
+                "points": 0,
+            })
+        result = result_of(match)
+        if result is None:
+            continue
+        home = teams[match["team1"]["teamId"]]
+        away = teams[match["team2"]["teamId"]]
+        home["played"] += 1
+        away["played"] += 1
+        home["goalsFor"] += result[0]
+        home["goalsAgainst"] += result[1]
+        away["goalsFor"] += result[1]
+        away["goalsAgainst"] += result[0]
+        if result[0] > result[1]:
+            home["wins"] += 1
+            away["losses"] += 1
+            home["points"] += 3
+        elif result[0] < result[1]:
+            away["wins"] += 1
+            home["losses"] += 1
+            away["points"] += 3
+        else:
+            home["draws"] += 1
+            away["draws"] += 1
+            home["points"] += 1
+            away["points"] += 1
+    standings = [
+        {**team, "goalDifference": team["goalsFor"] - team["goalsAgainst"]}
+        for team in teams.values()
+    ]
+    return sorted(
+        standings,
+        key=lambda team: (
+            -team["points"],
+            -team["goalDifference"],
+            -team["goalsFor"],
+            team["name"].casefold(),
+        ),
+    )
 
 
 def current_matchday(matches: list[dict], now: datetime | None = None) -> tuple[dict, list[dict]]:
@@ -291,14 +380,14 @@ def public_match(match: dict) -> dict:
 class FixtureFeed:
     def __init__(self, fetcher=None):
         self.fetcher = fetcher or self._fetch
-        self.cache: dict[int, tuple[float, list[dict]]] = {}
+        self.cache: dict[tuple[str, int], tuple[float, list[dict]]] = {}
         self.lock = threading.Lock()
 
     @staticmethod
-    def _fetch(season: int) -> list[dict]:
+    def _fetch(season: int, competition: str = "bl1") -> list[dict]:
         request = urllib.request.Request(
-            f"{OPENLIGADB}/{season}",
-            headers={"User-Agent": "Tippliga/1.0 (Bundesliga tip game)"},
+            f"{OPENLIGADB}/{competition}/{season}",
+            headers={"User-Agent": "Tippliga/1.0 (football tip game)"},
         )
         with urllib.request.urlopen(request, timeout=8) as response:
             data = json.loads(response.read(5_000_000))
@@ -306,14 +395,15 @@ class FixtureFeed:
             raise ValueError("Die Spielplan-Quelle hat ein unerwartetes Format geliefert.")
         return data
 
-    def get(self, season: int) -> list[dict]:
+    def get(self, season: int, competition: str = "bl1") -> list[dict]:
+        cache_key = (competition, season)
         with self.lock:
-            cached = self.cache.get(season)
+            cached = self.cache.get(cache_key)
             if cached and time.monotonic() - cached[0] < FIXTURE_CACHE_SECONDS:
                 return cached[1]
-        matches = self.fetcher(season)
+        matches = self.fetcher(season, competition)
         with self.lock:
-            self.cache[season] = (time.monotonic(), matches)
+            self.cache[cache_key] = (time.monotonic(), matches)
         return matches
 
 
@@ -363,10 +453,80 @@ class TippligaServer(ThreadingHTTPServer):
                 db.execute(
                     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE"
                 )
+                db.execute(
+                    "ALTER TABLE tips ADD COLUMN IF NOT EXISTS competition_code TEXT NOT NULL DEFAULT 'bl1'"
+                )
+                db.execute(
+                    """DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint constraint_row
+                        JOIN pg_attribute attribute_row
+                          ON attribute_row.attrelid = constraint_row.conrelid
+                         AND attribute_row.attnum = ANY(constraint_row.conkey)
+                        WHERE constraint_row.conrelid = 'tips'::regclass
+                          AND constraint_row.contype = 'p'
+                          AND attribute_row.attname = 'competition_code'
+                      ) THEN
+                        ALTER TABLE tips DROP CONSTRAINT IF EXISTS tips_pkey;
+                        ALTER TABLE tips ADD PRIMARY KEY
+                          (user_id, season, competition_code, match_id);
+                      END IF;
+                    END $$"""
+                )
             else:
                 columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
                 if "is_banned" not in columns:
                     db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+                tip_columns = {row["name"] for row in db.execute("PRAGMA table_info(tips)")}
+                if "competition_code" not in tip_columns:
+                    db.execute("ALTER TABLE tips ADD COLUMN competition_code TEXT NOT NULL DEFAULT 'bl1'")
+                primary_key_columns = [
+                    row["name"] for row in sorted(
+                        db.execute("PRAGMA table_info(tips)"),
+                        key=lambda column: column["pk"],
+                    ) if row["pk"]
+                ]
+                expected_primary_key = ["user_id", "season", "competition_code", "match_id"]
+                if primary_key_columns != expected_primary_key:
+                    db.execute("DROP INDEX IF EXISTS tips_competition_season_idx")
+                    db.execute(
+                        """CREATE TABLE tips_new (
+                           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                           season INTEGER NOT NULL,
+                           competition_code TEXT NOT NULL DEFAULT 'bl1',
+                           match_id INTEGER NOT NULL,
+                           matchday TEXT NOT NULL,
+                           home_goals INTEGER NOT NULL CHECK(home_goals BETWEEN 0 AND 20),
+                           away_goals INTEGER NOT NULL CHECK(away_goals BETWEEN 0 AND 20),
+                           updated_at TEXT NOT NULL,
+                           PRIMARY KEY(user_id, season, competition_code, match_id)
+                        )"""
+                    )
+                    db.execute(
+                        """INSERT INTO tips_new
+                           (user_id, season, competition_code, match_id, matchday,
+                            home_goals, away_goals, updated_at)
+                           SELECT user_id, season, competition_code, match_id, matchday,
+                                  home_goals, away_goals, updated_at FROM tips"""
+                    )
+                    db.execute("DROP TABLE tips")
+                    db.execute("ALTER TABLE tips_new RENAME TO tips")
+                    db.execute(
+                        """CREATE INDEX IF NOT EXISTS tips_competition_season_idx
+                           ON tips(season, competition_code, match_id)"""
+                    )
+            db.execute(
+                """INSERT INTO competition_tip_drafts
+                   (user_id, season, competition_code, matchday, predictions, updated_at)
+                   SELECT user_id, season, 'bl1', matchday, predictions, updated_at
+                   FROM tip_drafts WHERE TRUE
+                   ON CONFLICT(user_id, season, competition_code, matchday) DO NOTHING"""
+            )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS tips_competition_season_idx
+                   ON tips(season, competition_code, match_id)"""
+            )
         super().__init__(address, handler)
 
     def connect(self):
@@ -544,38 +704,53 @@ class Handler(SimpleHTTPRequestHandler):
             self.server.login_attempts[client] = attempts
             return True
 
-    def _season_matches(self):
-        return self.server.fixture_feed.get(season_for(datetime.now(BERLIN).date()))
+    def _season_matches(self, competition_code: str = "bl1"):
+        return self.server.fixture_feed.get(
+            season_for(datetime.now(BERLIN).date()), competition_code
+        )
 
-    def _state(self):
-        matches = self._season_matches()
-        group, active_matches = current_matchday(matches)
+    def _state(self, competition_code: str = "bl1"):
+        competition = next(
+            (item for item in COMPETITIONS if item["code"] == competition_code), None
+        )
+        if competition is None:
+            raise ValueError("Dieser Wettbewerb wird nicht unterstützt.")
+        matches = self._season_matches(competition_code)
+        if matches:
+            group, active_matches = current_matchday(matches)
+        else:
+            group, active_matches = {"groupName": "Noch keine Spiele verfügbar"}, []
         active = [public_match(match) for match in active_matches]
         user = self._current_user()
         with self.server.database() as db:
             leaderboard = db.execute(
                 """SELECT u.id, u.username, COUNT(DISTINCT t.matchday) AS matchdays
-                   FROM users u LEFT JOIN tips t ON t.user_id = u.id AND t.season = ?
+                   FROM users u LEFT JOIN tips t
+                     ON t.user_id = u.id AND t.season = ? AND t.competition_code = ?
                    WHERE u.is_banned = FALSE
                    GROUP BY u.id ORDER BY lower(u.username)""",
-                (season_for(datetime.now(BERLIN).date()),),
+                (season_for(datetime.now(BERLIN).date()), competition_code),
             ).fetchall()
             tips = []
             draft = {}
-            if user:
+            if user and matches:
                 tips = [dict(row) for row in db.execute(
                     """SELECT match_id, home_goals, away_goals FROM tips
-                       WHERE user_id = ? AND season = ? AND matchday = ?""",
-                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                       WHERE user_id = ? AND season = ? AND competition_code = ? AND matchday = ?""",
+                    (user["id"], season_for(datetime.now(BERLIN).date()),
+                     competition_code, group["groupName"]),
                 )]
                 draft_row = db.execute(
-                    """SELECT predictions FROM tip_drafts
-                       WHERE user_id = ? AND season = ? AND matchday = ?""",
-                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                    """SELECT predictions FROM competition_tip_drafts
+                       WHERE user_id = ? AND season = ? AND competition_code = ? AND matchday = ?""",
+                    (user["id"], season_for(datetime.now(BERLIN).date()),
+                     competition_code, group["groupName"]),
                 ).fetchone()
                 db.execute(
-                    "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday != ?",
-                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                    """DELETE FROM competition_tip_drafts
+                       WHERE user_id = ? AND season = ? AND competition_code = ? AND matchday != ?""",
+                    (user["id"], season_for(datetime.now(BERLIN).date()),
+                     competition_code, group["groupName"]),
                 )
                 if draft_row:
                     draft = json.loads(draft_row["predictions"]) if isinstance(
@@ -583,8 +758,8 @@ class Handler(SimpleHTTPRequestHandler):
                     ) else draft_row["predictions"]
             all_tips = db.execute(
                 """SELECT user_id, match_id, home_goals, away_goals FROM tips
-                   WHERE season = ?""",
-                (season_for(datetime.now(BERLIN).date()),),
+                   WHERE season = ? AND competition_code = ?""",
+                (season_for(datetime.now(BERLIN).date()), competition_code),
             ).fetchall()
 
         results = {int(match["matchID"]): result_of(match) for match in matches}
@@ -603,8 +778,11 @@ class Handler(SimpleHTTPRequestHandler):
             for row in leaderboard
         ]
         ranked.sort(key=lambda player: (-player["points"], player["username"].casefold()))
+        standings = league_standings(matches) if competition["kind"] == "league" else []
         return {
             "season": f"{season_for(datetime.now(BERLIN).date())}/{str(season_for(datetime.now(BERLIN).date()) + 1)[-2:]}",
+            "competition": competition,
+            "standings": standings,
             "matchday": group["groupName"],
             "matches": active,
             "leaderboard": ranked,
@@ -645,7 +823,9 @@ class Handler(SimpleHTTPRequestHandler):
         return "sent"
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        parsed_url = urlsplit(self.path)
+        path = parsed_url.path
+        query = parse_qs(parsed_url.query)
         if path == "/api/health":
             try:
                 with self.server.database() as db:
@@ -655,8 +835,14 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False})
             return
         if path == "/api/state":
+            competition_code = query.get("competition", ["bl1"])[0]
+            if not any(item["code"] == competition_code for item in COMPETITIONS):
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "error": "Dieser Wettbewerb wird nicht unterstützt."
+                })
+                return
             try:
-                state = self._state()
+                state = self._state(competition_code)
                 user = self._current_user()
                 device_cookie = None
                 if user:
@@ -676,7 +862,31 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json(HTTPStatus.OK, state, headers)
             except (OSError, urllib.error.URLError, TimeoutError, ValueError, KeyError, *DATABASE_ERRORS) as exc:
                 self._json(HTTPStatus.BAD_GATEWAY, {
-                    "error": f"Der aktuelle Bundesliga-Spielplan ist gerade nicht verfügbar: {exc}"
+                    "error": f"Der aktuelle Spielplan ist gerade nicht verfügbar: {exc}"
+                })
+            return
+        if path == "/api/competitions":
+            try:
+                season = season_for(datetime.now(BERLIN).date())
+
+                def fetch_competition(competition):
+                    try:
+                        return self.server.fixture_feed.get(season, competition["code"])
+                    except urllib.error.HTTPError as exc:
+                        if exc.code == HTTPStatus.NOT_FOUND:
+                            return []
+                        raise
+
+                with ThreadPoolExecutor(max_workers=len(COMPETITIONS)) as executor:
+                    fixtures = executor.map(fetch_competition, COMPETITIONS)
+                    available = [
+                        {**competition, "available": bool(matches)}
+                        for competition, matches in zip(COMPETITIONS, fixtures)
+                    ]
+                self._json(HTTPStatus.OK, {"competitions": available})
+            except (OSError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+                self._json(HTTPStatus.BAD_GATEWAY, {
+                    "error": f"Wettbewerbe konnten nicht geladen werden: {exc}"
                 })
             return
         if path == "/api/admin":
@@ -987,12 +1197,21 @@ class Handler(SimpleHTTPRequestHandler):
         if not user:
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "Bitte melde dich zuerst an."})
             return
+        competition_code = data.get("competitionCode", "bl1")
+        if not any(item["code"] == competition_code for item in COMPETITIONS):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Dieser Wettbewerb wird nicht unterstützt."})
+            return
         submitted = data.get("tips")
         if not isinstance(submitted, list) or not submitted or len(submitted) > 20:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Bitte gib mindestens einen gültigen Tipp ab."})
             return
         try:
-            matches = self._season_matches()
+            matches = self._season_matches(competition_code)
+            if not matches:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "error": "Für diesen Wettbewerb sind aktuell keine Spiele zum Tippen verfügbar."
+                })
+                return
             group, active_matches = current_matchday(matches)
             current_by_id = {int(match["matchID"]): match for match in active_matches}
             values = []
@@ -1017,24 +1236,26 @@ class Handler(SimpleHTTPRequestHandler):
                 if match.get("matchIsFinished") or kickoff <= now:
                     raise ValueError("Für ein bereits begonnenes Spiel kann kein Tipp mehr abgegeben werden.")
                 seen.add(match_id)
-                values.append((user["id"], season_for(datetime.now(BERLIN).date()), match_id,
-                               group["groupName"], home, away, now.isoformat()))
+                values.append((user["id"], season_for(datetime.now(BERLIN).date()), competition_code,
+                               match_id, group["groupName"], home, away, now.isoformat()))
                 lines.append(
                     f'{match["team1"]["shortName"]} {home}:{away} {match["team2"]["shortName"]}'
                 )
             with self.server.database() as db:
                 cursor = db.executemany(
-                    """INSERT INTO tips(user_id, season, match_id, matchday, home_goals,
-                                        away_goals, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(user_id, season, match_id) DO NOTHING""",
+                    """INSERT INTO tips(user_id, season, competition_code, match_id, matchday,
+                                        home_goals, away_goals, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id, season, competition_code, match_id) DO NOTHING""",
                     values,
                 )
                 if cursor.rowcount != len(values):
                     raise TipsAlreadyLockedError
                 db.execute(
-                    "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday = ?",
-                    (user["id"], season_for(datetime.now(BERLIN).date()), group["groupName"]),
+                    """DELETE FROM competition_tip_drafts
+                       WHERE user_id = ? AND season = ? AND competition_code = ? AND matchday = ?""",
+                    (user["id"], season_for(datetime.now(BERLIN).date()),
+                     competition_code, group["groupName"]),
                 )
             email_status = self._send_tip_email(user["username"], group["groupName"], lines)
             self._json(HTTPStatus.OK, {
@@ -1055,12 +1276,21 @@ class Handler(SimpleHTTPRequestHandler):
         if not user:
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "Bitte melde dich zuerst an."})
             return
+        competition_code = data.get("competitionCode", "bl1")
+        if not any(item["code"] == competition_code for item in COMPETITIONS):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Dieser Wettbewerb wird nicht unterstützt."})
+            return
         submitted = data.get("predictions")
         if not isinstance(submitted, list) or len(submitted) > 20:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Ungültiger Tipp-Entwurf."})
             return
         try:
-            matches = self._season_matches()
+            matches = self._season_matches(competition_code)
+            if not matches:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "error": "Für diesen Wettbewerb sind aktuell keine Spiele zum Tippen verfügbar."
+                })
+                return
             group, active_matches = current_matchday(matches)
             current_by_id = {int(match["matchID"]): match for match in active_matches}
             predictions = {}
@@ -1097,8 +1327,9 @@ class Handler(SimpleHTTPRequestHandler):
                 season = season_for(datetime.now(BERLIN).date())
                 locked_ids = {
                     str(row["match_id"]) for row in db.execute(
-                        "SELECT match_id FROM tips WHERE user_id = ? AND season = ?",
-                        (user["id"], season),
+                        """SELECT match_id FROM tips
+                           WHERE user_id = ? AND season = ? AND competition_code = ?""",
+                        (user["id"], season, competition_code),
                     )
                 }
                 predictions = {
@@ -1107,16 +1338,19 @@ class Handler(SimpleHTTPRequestHandler):
                 }
                 if predictions:
                     db.execute(
-                        """INSERT INTO tip_drafts(user_id, season, matchday, predictions, updated_at)
-                           VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(user_id, season, matchday) DO UPDATE SET
+                        """INSERT INTO competition_tip_drafts
+                           (user_id, season, competition_code, matchday, predictions, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(user_id, season, competition_code, matchday) DO UPDATE SET
                              predictions = excluded.predictions, updated_at = excluded.updated_at""",
-                        (user["id"], season, group["groupName"], json.dumps(predictions), now.isoformat()),
+                        (user["id"], season, competition_code, group["groupName"],
+                         json.dumps(predictions), now.isoformat()),
                     )
                 else:
                     db.execute(
-                        "DELETE FROM tip_drafts WHERE user_id = ? AND season = ? AND matchday = ?",
-                        (user["id"], season, group["groupName"]),
+                        """DELETE FROM competition_tip_drafts
+                           WHERE user_id = ? AND season = ? AND competition_code = ? AND matchday = ?""",
+                        (user["id"], season, competition_code, group["groupName"]),
                     )
             self._json(HTTPStatus.OK, {"ok": True})
         except (ValueError, KeyError, TypeError) as exc:

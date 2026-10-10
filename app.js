@@ -1,8 +1,26 @@
 let state = null;
 let authMode = "login";
 const COOKIE_CONSENT_KEY = "tippliga-cookie-consent";
+const COMPETITION_KEY = "tippliga-competition";
+const FALLBACK_COMPETITIONS = [
+  ["bl1", "1. Bundesliga", "Bundesliga (1.–3. Liga)", "league"],
+  ["bl2", "2. Bundesliga", "Bundesliga (1.–3. Liga)", "league"],
+  ["bl3", "3. Liga", "Bundesliga (1.–3. Liga)", "league"],
+  ["rln", "Regionalliga Nord", "4. Liga (Regionalligen)", "league"],
+  ["rlno", "Regionalliga Nordost", "4. Liga (Regionalligen)", "league"],
+  ["rlw", "Regionalliga West", "4. Liga (Regionalligen)", "league"],
+  ["rlsw", "Regionalliga Südwest", "4. Liga (Regionalligen)", "league"],
+  ["regio-bayern", "Regionalliga Bayern", "4. Liga (Regionalligen)", "league"],
+  ["DFBN", "DFB-Nationalspiele", "Länderspiele", "international"],
+  ["FTS", "Freundschafts-/Testspiele", "Länderspiele", "international"],
+  ["nla", "Nations League A", "Länderspiele", "international"],
+  ["wm26", "Weltmeisterschaft 2026", "Länderspiele", "international"],
+].map(([code, name, category, kind]) => ({ code, name, category, kind, available: false }));
 let cookieConsent = "unknown";
 let authAfterCookieConsent = false;
+let competitions = [];
+let selectedCompetitionCode = "bl1";
+let refreshSequence = 0;
 
 const leaderboardBody = document.querySelector("#leaderboard-body");
 const playerCount = document.querySelector("#player-count");
@@ -43,7 +61,8 @@ function openCookieSettings(forAuthentication = false) {
 
 function draftKey() {
   const username = state?.me?.username.toLowerCase() || "guest";
-  return `tippliga-draft:${username}`;
+  const competitionSuffix = selectedCompetitionCode === "bl1" ? "" : `:${selectedCompetitionCode}`;
+  return `tippliga-draft:${username}${competitionSuffix}`;
 }
 
 function loadDraft() {
@@ -56,7 +75,8 @@ function loadDraft() {
     const stored = localStorage.getItem(key);
     if (!stored) return predictions;
     const draft = JSON.parse(stored);
-    if (draft.season !== state.season || draft.matchday !== state.matchday) {
+    if (draft.season !== state.season || draft.matchday !== state.matchday
+      || (draft.competitionCode || "bl1") !== selectedCompetitionCode) {
       localStorage.removeItem(key);
       return predictions;
     }
@@ -91,6 +111,7 @@ function saveDraftInput(input) {
     localStorage.setItem(draftKey(), JSON.stringify({
       season: state.season,
       matchday: state.matchday,
+      competitionCode: selectedCompetitionCode,
       predictions,
     }));
   } catch (error) {
@@ -101,13 +122,17 @@ function saveDraftInput(input) {
 
 async function syncDraft() {
   if (!state?.me) return;
+  const competitionCode = selectedCompetitionCode;
   const predictions = loadDraft();
   const payload = Object.entries(predictions).map(([matchId, scores]) => ({
     matchId: Number(matchId),
     home: scores.home ?? null,
     away: scores.away ?? null,
   }));
-  const request = draftSyncPromise.then(() => api("/api/draft", { predictions: payload }));
+  const request = draftSyncPromise.then(() => api("/api/draft", {
+    competitionCode,
+    predictions: payload,
+  }));
   draftSyncPromise = request.catch(() => {});
   await request;
 }
@@ -122,21 +147,26 @@ function scheduleDraftSync() {
   }, 400);
 }
 
-function removeSubmittedDraft(tips) {
+function removeSubmittedDraft(tips, storageKey, season, matchday, competitionCode) {
   try {
-    const predictions = loadDraft();
+    const stored = localStorage.getItem(storageKey);
+    const draft = stored ? JSON.parse(stored) : {};
+    const predictions = { ...(draft.predictions || {}) };
     for (const tip of tips) delete predictions[String(tip.matchId)];
-    const key = draftKey();
     if (Object.keys(predictions).length) {
-      localStorage.setItem(key, JSON.stringify({
-        season: state.season,
-        matchday: state.matchday,
+      localStorage.setItem(storageKey, JSON.stringify({
+        season,
+        matchday,
+        competitionCode,
         predictions,
       }));
     } else {
-      localStorage.removeItem(key);
+      localStorage.removeItem(storageKey);
     }
-    state.draft = predictions;
+    if (state?.season === season && state?.matchday === matchday
+      && selectedCompetitionCode === competitionCode) {
+      state.draft = predictions;
+    }
   } catch (error) {
     console.error("Could not remove submitted tips from the local draft:", error);
     return false;
@@ -166,6 +196,59 @@ async function api(path, body) {
 
 function initials(name) {
   return name.slice(0, 2).toUpperCase();
+}
+
+function createFallbackCrest(name, shortName) {
+  const palette = ["#2364aa", "#a83232", "#28734a", "#7546a8", "#b36b1f", "#267c83", "#a13d72", "#59636f"];
+  const label = shortName || name;
+  let hash = 0;
+  for (const character of name.toLowerCase()) {
+    hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+  }
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("crest-fallback");
+  svg.setAttribute("viewBox", "0 0 48 48");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${name} – Ersatzwappen`);
+
+  const shield = document.createElementNS(svg.namespaceURI, "path");
+  shield.setAttribute("d", "M24 2 44 9v13c0 12-8 20-20 24C12 42 4 34 4 22V9z");
+  shield.setAttribute("fill", palette[hash % palette.length]);
+  shield.setAttribute("stroke", "#ffffff");
+  shield.setAttribute("stroke-opacity", ".72");
+  shield.setAttribute("stroke-width", "2");
+
+  const stripe = document.createElementNS(svg.namespaceURI, "path");
+  stripe.setAttribute("d", "m7 16 29-10 6 2v7L7 29z");
+  stripe.setAttribute("fill", palette[(hash + 3) % palette.length]);
+  stripe.setAttribute("opacity", ".8");
+
+  const text = document.createElementNS(svg.namespaceURI, "text");
+  text.setAttribute("x", "24");
+  text.setAttribute("y", "32");
+  text.setAttribute("text-anchor", "middle");
+  text.setAttribute("fill", "#ffffff");
+  text.setAttribute("font-family", "Arial, sans-serif");
+  text.setAttribute("font-size", label.length > 2 ? "12" : "15");
+  text.setAttribute("font-weight", "700");
+  text.textContent = initials(label);
+
+  svg.append(shield, stripe, text);
+  return svg;
+}
+
+function createTeamCrest(name, shortName, logoUrl) {
+  if (!logoUrl) return createFallbackCrest(name, shortName);
+  const logo = document.createElement("img");
+  logo.className = "club-crest";
+  logo.src = logoUrl;
+  logo.alt = `${name} Vereinswappen`;
+  logo.loading = "lazy";
+  logo.referrerPolicy = "no-referrer";
+  logo.addEventListener("error", () => {
+    logo.replaceWith(createFallbackCrest(name, shortName));
+  }, { once: true });
+  return logo;
 }
 
 function renderLeaderboard() {
@@ -213,6 +296,65 @@ function renderLeaderboard() {
   }
 }
 
+function renderLeagueTable() {
+  const panel = document.querySelector("#league-table-panel");
+  const body = document.querySelector("#league-table-body");
+  const competition = state?.competition;
+  const standings = state?.standings || [];
+  panel.hidden = false;
+  document.querySelector("#league-table-title").textContent = competition?.kind === "league"
+    ? `${competition.name} · Tabelle`
+    : `${competition?.name || "Wettbewerb"} · Keine Ligatabelle`;
+  if (competition?.kind !== "league") {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 9;
+    cell.textContent = "Für diesen Wettbewerb gibt es keine Vereinstabelle.";
+    row.append(cell);
+    body.replaceChildren(row);
+    return;
+  }
+  if (!standings.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 9;
+    cell.textContent = "Für diese Liga liegen derzeit noch keine Spielergebnisse vor.";
+    row.append(cell);
+    body.replaceChildren(row);
+    return;
+  }
+  body.replaceChildren(...standings.map((team, index) => {
+    const row = document.createElement("tr");
+    const values = [
+      String(index + 1),
+      team.name,
+      String(team.played),
+      String(team.wins),
+      String(team.draws),
+      String(team.losses),
+      `${team.goalsFor}:${team.goalsAgainst}`,
+      team.goalDifference > 0 ? `+${team.goalDifference}` : String(team.goalDifference),
+      String(team.points),
+    ];
+    for (const [columnIndex, value] of values.entries()) {
+      const cell = document.createElement("td");
+      if (columnIndex === 1) {
+        const teamInfo = document.createElement("span");
+        teamInfo.className = "league-team-name";
+        teamInfo.append(createTeamCrest(team.name, team.shortName, team.logo));
+        const name = document.createElement("span");
+        name.textContent = team.name;
+        teamInfo.append(name);
+        cell.append(teamInfo);
+      } else {
+        cell.textContent = value;
+      }
+      row.append(cell);
+    }
+    return row;
+  }));
+}
+
 function makeTeam(name, shortName, logoUrl, position) {
   const wrapper = document.createElement("div");
   wrapper.className = position;
@@ -220,26 +362,7 @@ function makeTeam(name, shortName, logoUrl, position) {
   team.className = "fixture-team";
   const badge = document.createElement("span");
   badge.className = "fixture-team-badge";
-  if (logoUrl) {
-    const logo = document.createElement("img");
-    logo.className = "club-crest";
-    logo.src = logoUrl;
-    logo.alt = `${name} Vereinswappen`;
-    logo.loading = "lazy";
-    logo.referrerPolicy = "no-referrer";
-    logo.addEventListener("error", () => {
-      const fallback = document.createElement("span");
-      fallback.className = "crest-fallback";
-      fallback.textContent = initials(shortName || name);
-      badge.replaceChildren(fallback);
-    }, { once: true });
-    badge.append(logo);
-  } else {
-    const fallback = document.createElement("span");
-    fallback.className = "crest-fallback";
-    fallback.textContent = initials(shortName || name);
-    badge.append(fallback);
-  }
+  badge.append(createTeamCrest(name, shortName, logoUrl));
   const label = document.createElement("span");
   label.textContent = name;
   team.append(badge, label);
@@ -280,7 +403,9 @@ function renderFixtures() {
     fixturesList.replaceChildren();
     const message = document.createElement("p");
     message.className = "fixture-error";
-    message.textContent = "Für den aktuellen Spieltag sind derzeit keine Spiele verfügbar.";
+    message.textContent = state?.competition
+      ? `Für ${state.competition.name} sind derzeit keine Spiele verfügbar.`
+      : "Für den aktuellen Spieltag sind derzeit keine Spiele verfügbar.";
     fixturesList.append(message);
     return;
   }
@@ -343,19 +468,7 @@ function renderNextMatch() {
 
 function setTeamBadge(badge, name, shortName, logoUrl) {
   badge.replaceChildren();
-  if (!logoUrl) {
-    badge.textContent = initials(shortName || name);
-    return;
-  }
-  const logo = document.createElement("img");
-  logo.className = "club-crest";
-  logo.src = logoUrl;
-  logo.alt = `${name} Vereinswappen`;
-  logo.referrerPolicy = "no-referrer";
-  logo.addEventListener("error", () => {
-    badge.textContent = initials(shortName || name);
-  }, { once: true });
-  badge.append(logo);
+  badge.append(createTeamCrest(name, shortName, logoUrl));
 }
 
 fixturesList.addEventListener("input", (event) => {
@@ -366,25 +479,33 @@ fixturesList.addEventListener("input", (event) => {
 });
 
 function render() {
+  renderCompetitionButtons();
   renderAccount();
   renderLeaderboard();
+  renderLeagueTable();
   renderFixtures();
   renderNextMatch();
   const roundNumber = state?.matchday?.match(/\d+/)?.[0] || "–";
   document.querySelector("#hero-round").innerHTML = `${roundNumber}<span>.</span>`;
   document.querySelector("#round-widget").setAttribute("aria-label", `Spieltag ${roundNumber}`);
   document.querySelector("#season-label").textContent = state?.season || "—";
+  document.querySelector("#table-season-label").textContent = state?.season || "—";
   document.querySelector("#matchday-label").textContent = state?.matchday
-    ? `${state.matchday.toUpperCase()} · DEIN GEFÜHL. DEIN TIPP.`
+    ? `${(state.competition?.name || "WETTBEWERB").toUpperCase()} · ${state.matchday.toUpperCase()} · DEIN TIPP.`
     : "DEIN GEFÜHL. DEIN TIPP.";
 }
 
 async function refresh() {
+  const requestId = ++refreshSequence;
+  const competitionCode = selectedCompetitionCode;
   try {
-    state = await api("/api/state");
+    const nextState = await api(`/api/state?competition=${encodeURIComponent(competitionCode)}`);
+    if (requestId !== refreshSequence) return;
+    state = nextState;
     render();
     await refreshAdminPanel();
   } catch (error) {
+    if (requestId !== refreshSequence) return;
     fixturesList.replaceChildren();
     const message = document.createElement("p");
     message.className = "fixture-error";
@@ -393,6 +514,113 @@ async function refresh() {
     document.querySelector("#tip-login-note").textContent = "Der Server oder Spielplan ist gerade nicht erreichbar.";
     submitStatus.textContent = error.message;
   }
+}
+
+function renderCompetitionButtons() {
+  const navs = [
+    document.querySelector("#competition-buttons"),
+    document.querySelector("#table-competition-buttons"),
+  ].filter(Boolean);
+  if (!navs.length) return;
+  const categories = [...new Set(competitions.map((item) => item.category))];
+  for (const nav of navs) {
+    nav.replaceChildren(...categories.map((category) => {
+      const group = document.createElement("div");
+      group.className = "competition-group";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", category);
+      const label = document.createElement("span");
+      label.className = "competition-category";
+      label.textContent = category;
+      group.append(label);
+      for (const competition of competitions.filter((item) => item.category === category)) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "competition-button";
+        button.textContent = competition.name;
+        button.setAttribute("aria-pressed", String(competition.code === selectedCompetitionCode));
+        if (!competition.available) {
+          button.title = "Für diese Staffel sind aktuell keine Spieldaten vorhanden. Du kannst den Wettbewerb trotzdem auswählen.";
+        }
+        button.addEventListener("click", () => {
+          if (competition.code === selectedCompetitionCode) return;
+          selectedCompetitionCode = competition.code;
+          try {
+            localStorage.setItem(COMPETITION_KEY, selectedCompetitionCode);
+          } catch (error) {
+            console.error("Could not save the selected competition:", error);
+          }
+          if (state) {
+            state = {
+              ...state,
+              competition: null,
+              matchday: null,
+              matches: [],
+              leaderboard: [],
+              tips: {},
+              draft: {},
+            };
+          }
+          renderCompetitionButtons();
+          render();
+          submitStatus.textContent = "";
+          refresh();
+        });
+        group.append(button);
+      }
+      return group;
+    }));
+  }
+}
+
+function setAppView(view) {
+  const isTablesView = view === "tabellen";
+  document.body.dataset.appView = isTablesView ? "tabellen" : "main";
+  document.querySelector(".hero").hidden = isTablesView;
+  document.querySelector("#rangliste").hidden = isTablesView;
+  document.querySelector("#tippen").hidden = isTablesView;
+  document.querySelector("#tabellen").hidden = !isTablesView;
+  for (const link of document.querySelectorAll(".nav-link[data-app-view]")) {
+    const active = link.dataset.appView === view;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+}
+
+document.querySelector(".main-nav").addEventListener("click", (event) => {
+  const link = event.target.closest("a[data-app-view]");
+  if (!link) return;
+  event.preventDefault();
+  setAppView(link.dataset.appView);
+  history.replaceState(null, "", link.getAttribute("href"));
+  document.querySelector(link.getAttribute("href"))?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+setAppView(location.hash === "#tabellen" ? "tabellen" : "main");
+
+async function initialize() {
+  try {
+    const savedCompetition = localStorage.getItem(COMPETITION_KEY);
+    if (savedCompetition) selectedCompetitionCode = savedCompetition;
+  } catch (error) {
+    console.error("Could not read the selected competition:", error);
+  }
+  try {
+    const data = await api("/api/competitions");
+    competitions = data.competitions;
+    if (!competitions.some((item) => item.code === selectedCompetitionCode && item.available)) {
+      selectedCompetitionCode = competitions.find((item) => item.code === "bl1")?.code
+        || competitions[0]?.code
+        || "bl1";
+    }
+    renderCompetitionButtons();
+  } catch (error) {
+    submitStatus.textContent = error.message;
+    competitions = FALLBACK_COMPETITIONS;
+    renderCompetitionButtons();
+  }
+  await refresh();
 }
 
 async function refreshAdminPanel() {
@@ -628,7 +856,9 @@ authForm.addEventListener("submit", async (event) => {
         password: form.get("password"),
       });
     }
-    const authenticatedState = await api("/api/state");
+    const authenticatedState = await api(
+      `/api/state?competition=${encodeURIComponent(selectedCompetitionCode)}`,
+    );
     if (authenticatedState.me?.username.toLowerCase() !== authenticatedUser.username.toLowerCase()) {
       throw new Error("Die Anmeldung hat nicht geklappt. Bitte erlaube Cookies in deinen Browser-Einstellungen und versuche es erneut.");
     }
@@ -674,9 +904,18 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
     home: score.home,
     away: score.away,
   }));
+  const competitionCode = selectedCompetitionCode;
+  const storageKey = draftKey();
+  const draftSeason = state.season;
+  const draftMatchday = state.matchday;
   try {
-    const result = await api("/api/tips", { tips });
-    const draftRemoved = removeSubmittedDraft(tips);
+    const result = await api("/api/tips", {
+      competitionCode,
+      tips,
+    });
+    const draftRemoved = removeSubmittedDraft(
+      tips, storageKey, draftSeason, draftMatchday, competitionCode,
+    );
     if (result.emailStatus === "sent") {
       submitStatus.textContent = "Tipps gespeichert und per E-Mail versendet.";
     } else if (result.emailStatus === "failed") {
@@ -693,7 +932,7 @@ document.querySelector("#submit-tips").addEventListener("click", async () => {
 });
 
 if (cookieConsent === "unknown") openCookieSettings();
-refresh();
+initialize();
 window.setInterval(refresh, 60 * 1000);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refresh();

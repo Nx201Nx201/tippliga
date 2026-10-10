@@ -64,6 +64,14 @@ a { color: inherit; text-decoration: none; }
 .panel { border: 1px solid #ffffff0c; background: var(--surface); border-radius: 8px; }
 .standings-panel { padding: 25px 26px 0; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px; }
+.competition-picker { margin: -3px 0 18px; }
+.competition-buttons { display: flex; flex-direction: column; gap: 9px; margin-top: 9px; }
+.competition-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.competition-category { min-width: 83px; color: #77776f; font-size: 9px; letter-spacing: .5px; }
+.competition-button { padding: 7px 10px; border: 1px solid #33332d; border-radius: 4px; background: #1c1c17; color: #b2b1a8; font: inherit; font-size: 10px; font-weight: 600; cursor: pointer; }
+.competition-button:hover, .competition-button:focus-visible { border-color: var(--yellow); color: var(--white); }
+.competition-button[aria-pressed="true"] { border-color: var(--yellow); background: #f2c50018; color: var(--yellow); }
+.competition-button:disabled { opacity: .42; cursor: not-allowed; }
 h2 { margin: 7px 0 0; font-size: 27px; letter-spacing: -1.2px; }
 .yellow-dot { color: var(--yellow); }
 .season-pill { margin-top: 6px; padding: 8px 10px; border: 1px solid #33332d; border-radius: 4px; color: #b2b1a8; font-size: 8px; letter-spacing: 1px; white-space: nowrap; }
@@ -82,6 +90,20 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
 .you-tag { padding: 3px 5px; border-radius: 3px; background: #f2c50020; color: var(--yellow); font-size: 7px; font-weight: 700; letter-spacing: .6px; }
 .podium { color: var(--yellow) !important; }
 .table-footer { height: 40px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); color: #85847b; font-size: 8px; letter-spacing: 1px; }
+.league-table-panel { padding: 17px 0 20px; border-top: 1px solid var(--line); }
+.league-table-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.league-table-heading h3 { margin: 0; color: #e4e3dc; font-size: 15px; }
+.league-table-heading span { color: #77776f; font-size: 7px; letter-spacing: .7px; }
+.league-table-panel th { padding: 8px 5px; }
+.league-table-panel td { padding: 8px 5px; font-size: 10px; }
+.league-table-panel td:nth-child(2) { min-width: 118px; white-space: normal; }
+.league-table-panel td:last-child { color: var(--yellow); }
+.league-team-name { display: inline-flex; align-items: center; gap: 8px; }
+.league-team-name .club-crest { width: 25px; height: 25px; flex: 0 0 auto; }
+.league-team-name .crest-fallback { width: 25px; height: 25px; flex: 0 0 auto; }
+.league-tables-page { width: min(1120px, 89%); min-height: 55vh; margin: 0 auto; padding: 55px 0 80px; }
+.league-tables-page .league-table-panel { padding: 20px; border: 1px solid #ffffff0c; border-radius: 8px; background: var(--surface); }
+body[data-app-view="tabellen"] #admin-panel { display: none; }
 .footer-arrow { padding-left: 5px; color: var(--yellow); font-size: 12px; }
 .side-column { display: grid; grid-template-rows: 1fr 1fr; gap: 14px; }
 .next-match-card { padding: 19px 20px; }
@@ -118,7 +140,8 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
 .fixture-home .fixture-team { flex-direction: row-reverse; }
 .fixture-team-badge { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid #ffffffbd; border-radius: 7px; background: #fff; color: #1b1b18; font: 700 12px "Space Grotesk", sans-serif; }
 .club-crest { display: block; width: 31px; height: 31px; object-fit: contain; }
-.crest-fallback { font: 700 11px "Space Grotesk", sans-serif; }
+.fixture-team-badge .crest-fallback { width: 100%; height: 100%; }
+.team-badge .crest-fallback { width: 31px; height: 31px; }
 .score-input { width: 42px; height: 35px; border: 1px solid #3e3e37; border-radius: 5px; outline: none; background: #131310; color: var(--white); text-align: center; font: 600 14px "Space Grotesk", sans-serif; }
 .score-input:focus { border-color: var(--yellow); box-shadow: 0 0 0 2px #f2c50020; }
 .score-input:disabled { border-color: #39392f; background: #24241f; color: #d4c66e; opacity: 1; }
@@ -173,7 +196,7 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .hero-score { width: 190px; height: 190px; margin-right: 2%; }
   .orbit-one { width: 226px; height: 226px; }.orbit-two { width: 262px; height: 262px; }
   .round-number { font-size: 68px; }.round-label { top: 35px; font-size: 7px; }.hero-caption { bottom: 27px; font-size: 8px; }
-  .content-grid, .tips-section { width: 92%; }
+  .content-grid, .tips-section, .league-tables-page { width: 92%; }
   .content-grid { grid-template-columns: 1fr; padding-top: 37px; }
   .side-column { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
   .standings-panel { padding: 21px 16px 0; }
@@ -183,15 +206,29 @@ td:last-child { color: var(--yellow); font: 600 12px "Space Grotesk", sans-serif
   .tips-section { padding-top: 50px; }
 }
 @media (max-width: 520px) {
-  .brand { font-size: 17px; gap: 7px; }.brand-mark { width: 29px; height: 29px; }
-  .main-nav { display: none; }.welcome-label { display: none; }
+  .brand { font-size: 17px; gap: 7px; }.brand-mark { width: 29px; height: 29px;   }
+  @media (max-width: 380px) {
+    .topbar { gap: 5px; padding: 0 8px; }
+    .brand { font-size: 14px; gap: 5px; }
+    .main-nav { gap: 4px; }
+    .nav-link { font-size: 8px; }
+    .account-area .button { padding: 0 6px; font-size: 8px; }
+  }
+  .topbar { gap: 8px; padding: 0 10px; }
+  .brand { font-size: 15px; }
+  .main-nav { display: flex; gap: 8px; }
+  .nav-link { font-size: 9px; white-space: nowrap; }
+  .nav-link.active::after { bottom: -23px; }
+  .account-area { gap: 0; }
+  .account-area .button { min-height: 32px; padding: 0 8px; font-size: 9px; }
+  .welcome-label { display: none; }
   .hero { min-height: 380px; align-items: flex-start; padding-top: 39px; }
   .hero-copy p { max-width: 245px; font-size: 11px; line-height: 1.6; }
   .hero-score { position: absolute; width: 105px; height: 105px; right: 19px; bottom: 47px; opacity: .9; }
   .orbit-one { width: 125px; height: 125px; }.orbit-two { width: 145px; height: 145px; }
   .round-number { margin-top: 6px; font-size: 42px; letter-spacing: -4px; }.round-label { top: 17px; font-size: 5px; letter-spacing: 1px; }.hero-caption { bottom: 14px; font-size: 6px; }
   .hero-bottom { font-size: 7px; letter-spacing: .8px; }
-  .content-grid, .tips-section { width: calc(100% - 30px); }
+  .content-grid, .tips-section, .league-tables-page { width: calc(100% - 30px); }
   .section-heading { gap: 8px; }.season-pill { padding: 7px 6px; font-size: 7px; }
   th { padding: 9px 5px; font-size: 7px; }td { padding: 10px 5px; font-size: 9px; }
   .player-cell { gap: 5px; }.avatar { width: 22px; height: 22px; font-size: 8px; }.you-tag { padding: 3px; }

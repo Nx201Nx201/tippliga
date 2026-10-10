@@ -19,8 +19,9 @@
         <span>tipp<span class="brand-light">liga</span></span>
       </a>
       <nav class="main-nav" aria-label="Hauptnavigation">
-        <a class="nav-link active" href="#rangliste">Rangliste</a>
-        <a class="nav-link" href="#tippen">Tipps abgeben</a>
+        <a class="nav-link active" href="#rangliste" data-app-view="main">Rangliste</a>
+        <a class="nav-link" href="#tabellen" data-app-view="tabellen">Ligatabellen</a>
+        <a class="nav-link" href="#tippen" data-app-view="main">Tipps abgeben</a>
       </nav>
       <div class="account-area">
         <span id="welcome-label" class="welcome-label"></span>
@@ -31,7 +32,7 @@
     <main>
       <section class="hero">
         <div class="hero-copy">
-          <div class="eyebrow"><span class="live-dot"></span> DIE TIPPLIGA ZUR BUNDESLIGA</div>
+          <div class="eyebrow"><span class="live-dot"></span> DIE FUSSBALL-TIPPLIGA</div>
           <h1>Zeig, was in<br>deinen Tipps <span>steckt.</span></h1>
           <p>Tippe den Spieltag. Sammle Punkte. Hol dir den Platz ganz oben.</p>
           <a class="button button-yellow" href="#tippen">Jetzt Spieltag tippen <span aria-hidden="true">↗</span></a>
@@ -43,7 +44,7 @@
           <div class="round-number" id="hero-round">—<span>.</span></div>
           <div class="hero-caption">Dein Moment ist jetzt.</div>
         </div>
-        <div class="hero-bottom"><span>01 — 34 SPIELTAGE</span><span>DEINE TIPPS. DEINE LIGA.</span></div>
+        <div class="hero-bottom"><span>DEUTSCHE LIGEN & LÄNDERSPIELE</span><span>DEINE TIPPS. DEINE LIGA.</span></div>
       </section>
 
       <section class="content-grid" id="rangliste">
@@ -54,6 +55,10 @@
               <h2>Die Rangliste<span class="yellow-dot">.</span></h2>
             </div>
             <span class="season-pill"><span class="season-dot"></span> SAISON <span id="season-label">—</span></span>
+          </div>
+          <div class="competition-picker">
+            <div class="eyebrow muted">WETTBEWERB WECHSELN</div>
+            <nav id="competition-buttons" class="competition-buttons" aria-label="Wettbewerbe"></nav>
           </div>
           <div class="table-wrap">
             <table>
@@ -106,6 +111,34 @@
           <button id="submit-tips" class="button button-yellow" type="button">Tipps abschicken <span aria-hidden="true">↗</span></button>
         </div>
         <p id="submit-status" class="submit-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="tabellen" class="league-tables-page" hidden>
+        <div class="section-heading">
+          <div>
+            <div class="eyebrow muted">BUNDESLIGA · 2. LIGA · 3. LIGA · REGIONALLIGEN</div>
+            <h2>Die Ligatabellen<span class="yellow-dot">.</span></h2>
+          </div>
+          <span class="season-pill"><span class="season-dot"></span> SAISON <span id="table-season-label">—</span></span>
+        </div>
+        <div class="competition-picker">
+          <div class="eyebrow muted">LIGA AUSWÄHLEN</div>
+          <nav id="table-competition-buttons" class="competition-buttons" aria-label="Ligatabellen auswählen"></nav>
+        </div>
+        <section id="league-table-panel" class="league-table-panel">
+          <div class="league-table-heading">
+            <h3 id="league-table-title">Ligatabelle</h3>
+            <span>STAND NACH ABGESCHLOSSENEN SPIELEN</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>PLATZ</th><th>VEREIN</th><th>SP</th><th>S</th><th>U</th><th>N</th><th>TORE</th><th>DIFF.</th><th>P</th></tr>
+              </thead>
+              <tbody id="league-table-body"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section id="admin-panel" class="admin-section panel" hidden>

@@ -17,6 +17,20 @@ const scrypt = promisify(scryptCallback);
 const sessionDays = 30;
 const adminUsername = (process.env.TIPPLIGA_ADMIN_USERNAME || "Nx201Nx201").toLowerCase();
 const fixtureCache = new Map();
+const competitionCatalog = [
+  { code: "bl1", name: "1. Bundesliga", category: "Bundesliga (1.–3. Liga)", kind: "league" },
+  { code: "bl2", name: "2. Bundesliga", category: "Bundesliga (1.–3. Liga)", kind: "league" },
+  { code: "bl3", name: "3. Liga", category: "Bundesliga (1.–3. Liga)", kind: "league" },
+  { code: "rln", name: "Regionalliga Nord", category: "4. Liga (Regionalligen)", kind: "league" },
+  { code: "rlno", name: "Regionalliga Nordost", category: "4. Liga (Regionalligen)", kind: "league" },
+  { code: "regio-bayern", name: "Regionalliga Bayern", category: "4. Liga (Regionalligen)", kind: "league" },
+  { code: "rlw", name: "Regionalliga West", category: "4. Liga (Regionalligen)", kind: "league" },
+  { code: "rlsw", name: "Regionalliga Südwest", category: "4. Liga (Regionalligen)", kind: "league" },
+  { code: "DFBN", name: "DFB-Nationalspiele", category: "Länderspiele", kind: "international" },
+  { code: "FTS", name: "Freundschafts-/Testspiele", category: "Länderspiele", kind: "international" },
+  { code: "nla", name: "Nations League A", category: "Länderspiele", kind: "international" },
+  { code: "wm26", name: "Weltmeisterschaft 2026", category: "Länderspiele", kind: "international" },
+];
 let pool;
 let schemaPromise;
 
@@ -44,14 +58,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS tips (
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   season INTEGER NOT NULL,
+  competition_code TEXT NOT NULL DEFAULT 'bl1',
   match_id BIGINT NOT NULL,
   matchday TEXT NOT NULL,
   home_goals INTEGER NOT NULL CHECK (home_goals BETWEEN 0 AND 20),
   away_goals INTEGER NOT NULL CHECK (away_goals BETWEEN 0 AND 20),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (user_id, season, match_id)
+  PRIMARY KEY (user_id, season, competition_code, match_id)
 );
-CREATE INDEX IF NOT EXISTS tips_season_idx ON tips (season, match_id);
+ALTER TABLE tips ADD COLUMN IF NOT EXISTS competition_code TEXT NOT NULL DEFAULT 'bl1';
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint constraint_row
+    JOIN pg_attribute attribute_row
+      ON attribute_row.attrelid = constraint_row.conrelid
+     AND attribute_row.attnum = ANY(constraint_row.conkey)
+    WHERE constraint_row.conrelid = 'tips'::regclass
+      AND constraint_row.contype = 'p'
+      AND attribute_row.attname = 'competition_code'
+  ) THEN
+    ALTER TABLE tips DROP CONSTRAINT IF EXISTS tips_pkey;
+    ALTER TABLE tips ADD PRIMARY KEY (user_id, season, competition_code, match_id);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS tips_competition_season_idx ON tips (season, competition_code, match_id);
 CREATE TABLE IF NOT EXISTS tip_drafts (
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   season INTEGER NOT NULL,
@@ -60,6 +92,18 @@ CREATE TABLE IF NOT EXISTS tip_drafts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id, season, matchday)
 );
+CREATE TABLE IF NOT EXISTS competition_tip_drafts (
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  season INTEGER NOT NULL,
+  competition_code TEXT NOT NULL,
+  matchday TEXT NOT NULL,
+  predictions JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, season, competition_code, matchday)
+);
+INSERT INTO competition_tip_drafts (user_id, season, competition_code, matchday, predictions, updated_at)
+SELECT user_id, season, 'bl1', matchday, predictions, updated_at FROM tip_drafts
+ON CONFLICT (user_id, season, competition_code, matchday) DO NOTHING;
 CREATE TABLE IF NOT EXISTS blocked_usernames (
   username TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -243,56 +287,132 @@ async function clearSession(request) {
   return "tippliga_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
 }
 
-async function fixturesFor(season) {
-  const cached = fixtureCache.get(season);
+async function fixturesFor(season, competition = "bl1") {
+  const cacheKey = `${competition}:${season}`;
+  const cached = fixtureCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < 30 * 1000) return cached.matches;
-  const response = await fetch(`https://api.openligadb.de/getmatchdata/bl1/${season}`, {
+  const response = await fetch(`https://api.openligadb.de/getmatchdata/${encodeURIComponent(competition)}/${season}`, {
     headers: { "User-Agent": "Tippliga/1.0 (Bundesliga tip game)" },
     signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`Die Spielplan-Quelle antwortete mit HTTP ${response.status}.`);
   const matches = await response.json();
   if (!Array.isArray(matches)) throw new Error("Die Spielplan-Quelle hat ein unerwartetes Format geliefert.");
-  fixtureCache.set(season, { timestamp: Date.now(), matches });
+  fixtureCache.set(cacheKey, { timestamp: Date.now(), matches });
   return matches;
 }
 
-async function stateFor(request) {
+async function availableCompetitions() {
   const season = seasonFor();
-  const matches = await fixturesFor(season);
-  const { group, matches: activeMatches } = currentMatchday(matches);
+  const results = await Promise.all(competitionCatalog.map(async (competition) => ({
+    competition,
+    matches: await fixturesFor(season, competition.code).catch((error) => {
+      if (error.message.includes("HTTP 404")) return [];
+      throw error;
+    }),
+  })));
+  return results
+    .map(({ competition, matches }) => ({
+      ...competition,
+      available: matches.length > 0,
+    }));
+}
+
+export function leagueStandings(matches) {
+  const teams = new Map();
+  for (const match of matches) {
+    for (const [side, team] of [["home", match.team1], ["away", match.team2]]) {
+      if (!teams.has(team.teamId)) {
+        teams.set(team.teamId, {
+          teamId: team.teamId,
+          name: team.teamName,
+          shortName: team.shortName,
+          logo: team.teamIconUrl,
+          played: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          goalsFor: 0,
+          goalsAgainst: 0,
+          points: 0,
+        });
+      }
+    }
+    const result = resultOf(match);
+    if (!result) continue;
+    const home = teams.get(match.team1.teamId);
+    const away = teams.get(match.team2.teamId);
+    home.played += 1;
+    away.played += 1;
+    home.goalsFor += result[0];
+    home.goalsAgainst += result[1];
+    away.goalsFor += result[1];
+    away.goalsAgainst += result[0];
+    if (result[0] > result[1]) {
+      home.wins += 1;
+      away.losses += 1;
+      home.points += 3;
+    } else if (result[0] < result[1]) {
+      away.wins += 1;
+      home.losses += 1;
+      away.points += 3;
+    } else {
+      home.draws += 1;
+      away.draws += 1;
+      home.points += 1;
+      away.points += 1;
+    }
+  }
+  return [...teams.values()].map((team) => ({
+    ...team,
+    goalDifference: team.goalsFor - team.goalsAgainst,
+  })).sort((first, second) => second.points - first.points
+    || second.goalDifference - first.goalDifference
+    || second.goalsFor - first.goalsFor
+    || first.name.localeCompare(second.name));
+}
+
+async function stateFor(request, competitionCode = "bl1") {
+  const season = seasonFor();
+  const competition = competitionCatalog.find(({ code }) => code === competitionCode);
+  if (!competition) throw new Error("Dieser Wettbewerb wird nicht unterstützt.");
+  const matches = await fixturesFor(season, competition.code);
+  const { group, matches: activeMatches } = matches.length
+    ? currentMatchday(matches)
+    : { group: { groupName: "Noch keine Spiele verfügbar" }, matches: [] };
   const active = activeMatches.map(publicMatch);
   const user = await currentUser(request);
   const db = await readyDatabase();
   const leaderboard = await db.query(
     `SELECT u.id, u.username, COUNT(DISTINCT t.matchday)::int AS matchdays
-     FROM users u LEFT JOIN tips t ON t.user_id = u.id AND t.season = $1
+     FROM users u LEFT JOIN tips t
+       ON t.user_id = u.id AND t.season = $1 AND t.competition_code = $2
      WHERE u.is_banned = FALSE
      GROUP BY u.id ORDER BY lower(u.username)`,
-    [season],
+    [season, competition.code],
   );
-  const tips = user
+  const tips = user && matches.length
     ? await db.query(
       `SELECT match_id, home_goals, away_goals FROM tips
-       WHERE user_id = $1 AND season = $2 AND matchday = $3`,
-      [user.id, season, group.groupName],
+       WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND matchday = $4`,
+      [user.id, season, competition.code, group.groupName],
     )
     : { rows: [] };
   const allTips = await db.query(
-    "SELECT user_id, match_id, home_goals, away_goals FROM tips WHERE season = $1",
-    [season],
+    "SELECT user_id, match_id, home_goals, away_goals FROM tips WHERE season = $1 AND competition_code = $2",
+    [season, competition.code],
   );
-  const draftResult = user
+  const draftResult = user && matches.length
     ? await db.query(
-      `SELECT predictions FROM tip_drafts
-       WHERE user_id = $1 AND season = $2 AND matchday = $3`,
-      [user.id, season, group.groupName],
+      `SELECT predictions FROM competition_tip_drafts
+       WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND matchday = $4`,
+      [user.id, season, competition.code, group.groupName],
     )
     : { rows: [] };
-  if (user) {
+  if (user && matches.length) {
     await db.query(
-      "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday <> $3",
-      [user.id, season, group.groupName],
+      "DELETE FROM competition_tip_drafts WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND matchday <> $4",
+      [user.id, season, competition.code, group.groupName],
     );
   }
   const results = new Map(matches.map((match) => [Number(match.matchID), resultOf(match)]));
@@ -312,10 +432,13 @@ async function stateFor(request) {
     matchdays: row.matchdays,
     points: userScores.get(String(row.id)) || 0,
   })).sort((a, b) => b.points - a.points || a.username.toLowerCase().localeCompare(b.username.toLowerCase()));
+  const standings = competition.kind === "league" ? leagueStandings(matches) : [];
   const seasonLabel = `${season}/${String(season + 1).slice(-2)}`;
   return {
     season: seasonLabel,
     matchday: group.groupName,
+    competition,
+    standings,
     matches: active,
     leaderboard: ranked,
     me: user ? {
@@ -332,8 +455,8 @@ async function stateFor(request) {
   };
 }
 
-async function stateResponse(request) {
-  const state = await stateFor(request);
+async function stateResponse(request, competitionCode = "bl1") {
+  const state = await stateFor(request, competitionCode);
   const user = await currentUser(request);
   if (!user) return json(state);
   const device = newDeviceToken(request);
@@ -503,12 +626,17 @@ async function sendTipEmail(username, matchday, lines) {
 async function saveTips(data, request) {
   const user = await currentUser(request);
   if (!user) return json({ error: "Bitte melde dich zuerst an." }, 401);
+  const competition = competitionCatalog.find(({ code }) => code === (data.competitionCode || "bl1"));
+  if (!competition) return json({ error: "Dieser Wettbewerb wird nicht unterstützt." }, 400);
   const submitted = data.tips;
   if (!Array.isArray(submitted) || !submitted.length || submitted.length > 20) {
     return json({ error: "Bitte gib mindestens einen gültigen Tipp ab." }, 400);
   }
   const season = seasonFor();
-  const matches = await fixturesFor(season);
+  const matches = await fixturesFor(season, competition.code);
+  if (!matches.length) {
+    return json({ error: "Für diesen Wettbewerb sind aktuell keine Spiele verfügbar." }, 400);
+  }
   const { group, matches: activeMatches } = currentMatchday(matches);
   const currentById = new Map(activeMatches.map((match) => [Number(match.matchID), match]));
   const seen = new Set();
@@ -533,22 +661,22 @@ async function saveTips(data, request) {
       return json({ error: "Für ein bereits begonnenes Spiel kann kein Tipp mehr abgegeben werden." }, 400);
     }
     seen.add(matchId);
-    rows.push([user.id, season, matchId, group.groupName, home, away]);
+    rows.push([user.id, season, competition.code, matchId, group.groupName, home, away]);
     lines.push(`${match.team1.shortName} ${home}:${away} ${match.team2.shortName}`);
   }
 
   const db = await readyDatabase();
   const valuePlaceholders = rows.map((_, index) => {
-    const offset = index * 6;
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`;
+    const offset = index * 7;
+    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`;
   }).join(", ");
   const client = await db.connect();
   try {
     await client.query("BEGIN");
     const saved = await client.query(
-      `INSERT INTO tips (user_id, season, match_id, matchday, home_goals, away_goals)
+      `INSERT INTO tips (user_id, season, competition_code, match_id, matchday, home_goals, away_goals)
        VALUES ${valuePlaceholders}
-       ON CONFLICT (user_id, season, match_id) DO NOTHING`,
+       ON CONFLICT (user_id, season, competition_code, match_id) DO NOTHING`,
       rows.flat(),
     );
     if (saved.rowCount !== rows.length) {
@@ -558,8 +686,8 @@ async function saveTips(data, request) {
       }, 409);
     }
     await client.query(
-      "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday = $3",
-      [user.id, season, group.groupName],
+      "DELETE FROM competition_tip_drafts WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND matchday = $4",
+      [user.id, season, competition.code, group.groupName],
     );
     await client.query("COMMIT");
   } catch (error) {
@@ -575,12 +703,17 @@ async function saveTips(data, request) {
 async function saveDraft(data, request) {
   const user = await currentUser(request);
   if (!user) return json({ error: "Bitte melde dich zuerst an." }, 401);
+  const competition = competitionCatalog.find(({ code }) => code === (data.competitionCode || "bl1"));
+  if (!competition) return json({ error: "Dieser Wettbewerb wird nicht unterstützt." }, 400);
   const submitted = data.predictions;
   if (!Array.isArray(submitted) || submitted.length > 20) {
     return json({ error: "Ungültiger Tipp-Entwurf." }, 400);
   }
   const season = seasonFor();
-  const matches = await fixturesFor(season);
+  const matches = await fixturesFor(season, competition.code);
+  if (!matches.length) {
+    return json({ error: "Für diesen Wettbewerb sind aktuell keine Spiele verfügbar." }, 400);
+  }
   const { group, matches: activeMatches } = currentMatchday(matches);
   const currentById = new Map(activeMatches.map((match) => [Number(match.matchID), match]));
   const predictions = {};
@@ -618,22 +751,22 @@ async function saveDraft(data, request) {
     await client.query("BEGIN");
     const locked = await client.query(
       `SELECT match_id FROM tips
-       WHERE user_id = $1 AND season = $2 AND match_id = ANY($3::bigint[])`,
-      [user.id, season, Object.keys(predictions)],
+       WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND match_id = ANY($4::bigint[])`,
+      [user.id, season, competition.code, Object.keys(predictions)],
     );
     for (const row of locked.rows) delete predictions[String(row.match_id)];
     if (Object.keys(predictions).length) {
       await client.query(
-        `INSERT INTO tip_drafts (user_id, season, matchday, predictions, updated_at)
-         VALUES ($1, $2, $3, $4::jsonb, NOW())
-         ON CONFLICT (user_id, season, matchday) DO UPDATE SET
+        `INSERT INTO competition_tip_drafts (user_id, season, competition_code, matchday, predictions, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+         ON CONFLICT (user_id, season, competition_code, matchday) DO UPDATE SET
            predictions = EXCLUDED.predictions, updated_at = NOW()`,
-        [user.id, season, group.groupName, JSON.stringify(predictions)],
+        [user.id, season, competition.code, group.groupName, JSON.stringify(predictions)],
       );
     } else {
       await client.query(
-        "DELETE FROM tip_drafts WHERE user_id = $1 AND season = $2 AND matchday = $3",
-        [user.id, season, group.groupName],
+        "DELETE FROM competition_tip_drafts WHERE user_id = $1 AND season = $2 AND competition_code = $3 AND matchday = $4",
+        [user.id, season, competition.code, group.groupName],
       );
     }
     await client.query("COMMIT");
@@ -788,13 +921,25 @@ async function handle(request) {
       return json({ ok: false }, 503);
     }
   }
-  if (request.method === "GET" && path === "/api/state") {
+  if (request.method === "GET" && path === "/api/competitions") {
     try {
-      return await stateResponse(request);
+      return json({ competitions: await availableCompetitions() });
+    } catch (error) {
+      console.error("Competition catalogue failed:", error);
+      return json({ error: "Wettbewerbe konnten nicht geladen werden." }, 502);
+    }
+  }
+  if (request.method === "GET" && path === "/api/state") {
+    const competitionCode = url.searchParams.get("competition") || "bl1";
+    if (!competitionCatalog.some(({ code }) => code === competitionCode)) {
+      return json({ error: "Dieser Wettbewerb wird nicht unterstützt." }, 400);
+    }
+    try {
+      return await stateResponse(request, competitionCode);
     } catch (error) {
       console.error("State request failed:", error);
       return json({
-        error: "Der aktuelle Bundesliga-Spielplan oder die Datenbank ist gerade nicht verfügbar.",
+        error: "Der aktuelle Spielplan oder die Datenbank ist gerade nicht verfügbar.",
       }, 502);
     }
   }
